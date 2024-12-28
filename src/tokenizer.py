@@ -2056,8 +2056,8 @@ def main():
         tokenizer = trainer.train()
         
         # Save trained tokenizer
-        output_dir = Path('processed/tokenizer')
-        output_dir.mkdir(exist_ok=True)
+        output_dir = Path('data/processed/tokenizer')
+        output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "tokenizer.json"
         tokenizer.save(str(output_path))
         
