@@ -1,9 +1,23 @@
-2024-12-28 22:57:50,578 - INFO - Loading dataset: Trelis/tiny-shakespeare
-2024-12-28 22:58:14,304 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
-2024-12-28 22:58:23,086 - INFO - Loading dataset: stas/openwebtext-10k
-2024-12-28 22:58:32,088 - INFO - Loading dataset: Technoculture/medical-prescriptions
-2024-12-28 22:59:17,014 - INFO - Processing dataset: local
-2024-12-28 22:59:17,031 - INFO - Processing dataset: medical_textbook
-2024-12-28 22:59:17,031 - INFO - Processing dataset: openwebtext
-2024-12-28 22:59:17,036 - INFO - Training tokenizer on 10814 texts
-2024-12-28 22:59:35,715 - INFO - Tokenizer saved to data\processed\tokenizer\tokenizer.json
+2024-12-28 23:10:15,486 - INFO - Loading dataset: Trelis/tiny-shakespeare
+2024-12-28 23:10:41,422 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
+2024-12-28 23:10:50,945 - INFO - Loading dataset: stas/openwebtext-10k
+2024-12-28 23:10:58,323 - INFO - Loading dataset: Technoculture/medical-prescriptions
+2024-12-28 23:11:41,835 - INFO - Processing dataset: local
+2024-12-28 23:11:41,850 - INFO - Processing dataset: medical_textbook
+2024-12-28 23:11:41,850 - INFO - Processing dataset: openwebtext
+2024-12-28 23:11:41,853 - INFO - Training tokenizer on 10814 texts
+2024-12-28 23:12:01,156 - INFO - Tokenizer saved to data\processed\tokenizer\tokenizer.json
+2024-12-28 23:43:39,930 - ERROR - Local dataset path does not exist: r"C:\Users\ASUS\Desktop\LuminaLM-base-0.1\data\raw"
+2024-12-28 23:43:39,931 - ERROR - Error during tokenizer training: Invalid dataset configuration
+2024-12-28 23:44:40,066 - ERROR - Error during tokenizer training: while scanning a double-quoted scalar
+  in "C:\Users\ASUS\Desktop\LuminaLM-base-0.1\config\dataset_config.yaml", line 5, column 11
+expected escape sequence of 8 hexadecimal numbers, but found 's'
+  in "C:\Users\ASUS\Desktop\LuminaLM-base-0.1\config\dataset_config.yaml", line 5, column 16
+2024-12-28 23:46:32,669 - INFO - Loading dataset: Trelis/tiny-shakespeare
+2024-12-28 23:46:55,555 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
+2024-12-28 23:47:04,400 - INFO - Loading dataset: stas/openwebtext-10k
+2024-12-28 23:47:13,329 - INFO - Processing dataset: local
+2024-12-28 23:47:13,349 - INFO - Processing dataset: medical_textbook
+2024-12-28 23:47:13,349 - INFO - Processing dataset: openwebtext
+2024-12-28 23:47:13,353 - INFO - Training tokenizer on 10814 texts
+2024-12-28 23:47:32,855 - INFO - Tokenizer saved to data\processed\tokenizer\tokenizer.json

@@ -1,281 +1,151 @@
 Starting tokenizer training...
-Processing local files:   0%|          | 0/177 [00:00<?, ?it/s]Processing local files:  92%|#########2| 163/177 [00:00<00:00, 1629.46it/s]Processing local files: 100%|##########| 177/177 [00:00<00:00, 588.10it/s] 
-2024-12-28 22:57:50,578 - INFO - Loading dataset: Trelis/tiny-shakespeare
+Processing local files:   0%|          | 0/177 [00:00<?, ?it/s]Processing local files:  89%|########9 | 158/177 [00:00<00:00, 668.21it/s]Processing local files: 100%|##########| 177/177 [00:00<00:00, 254.50it/s]
+2024-12-28 23:46:32,669 - INFO - Loading dataset: Trelis/tiny-shakespeare
 Loading Trelis/tiny-shakespeare:   0%|          | 0/1 [00:00<?, ?dataset/s]
-Generating train split: 0 examples [00:00, ? examples/s][AGenerating train split: 472 examples [00:00, 23608.18 examples/s]
+Generating train split: 0 examples [00:00, ? examples/s][AGenerating train split: 472 examples [00:00, 23555.09 examples/s]
 
-Generating test split: 0 examples [00:00, ? examples/s][AGenerating test split: 49 examples [00:00, 9802.58 examples/s]
-Loading Trelis/tiny-shakespeare: 100%|##########| 1/1 [00:23<00:00, 23.72s/dataset]
+Generating test split: 0 examples [00:00, ? examples/s][AGenerating test split: 49 examples [00:00, 3027.26 examples/s]
+Loading Trelis/tiny-shakespeare: 100%|##########| 1/1 [00:22<00:00, 22.88s/dataset]
 Processing Trelis/tiny-shakespeare:   0%|          | 0/472 [00:00<?, ? samples/s][A
-Processing Trelis/tiny-shakespeare:  21%|##1       | 100/472 [00:00<00:00, 50117.15 samples/s, rate=1000.0 samples/s][A
-Processing Trelis/tiny-shakespeare:  42%|####2     | 200/472 [00:00<00:00, 50027.48 samples/s, rate=2000.0 samples/s][A
-Processing Trelis/tiny-shakespeare:  64%|######3   | 300/472 [00:00<00:00, 60018.66 samples/s, rate=3000.0 samples/s][A
-Processing Trelis/tiny-shakespeare:  85%|########4 | 400/472 [00:00<00:00, 57213.26 samples/s, rate=4000.0 samples/s][AProcessing Trelis/tiny-shakespeare: 100%|##########| 472/472 [00:00<00:00, 52510.85 samples/s, rate=4000.0 samples/s]
-Loading Trelis/tiny-shakespeare: 100%|##########| 1/1 [00:23<00:00, 23.72s/dataset]
-2024-12-28 22:58:14,304 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
+Processing Trelis/tiny-shakespeare:  21%|##1       | 100/472 [00:00<00:00, 50027.48 samples/s, rate=1000.0 samples/s][A
+Processing Trelis/tiny-shakespeare:  42%|####2     | 200/472 [00:00<00:00, 50024.50 samples/s, rate=2000.0 samples/s][A
+Processing Trelis/tiny-shakespeare:  64%|######3   | 300/472 [00:00<00:00, 60012.93 samples/s, rate=3000.0 samples/s][A
+Processing Trelis/tiny-shakespeare:  85%|########4 | 400/472 [00:00<00:00, 57154.79 samples/s, rate=4000.0 samples/s][AProcessing Trelis/tiny-shakespeare: 100%|##########| 472/472 [00:00<00:00, 52403.82 samples/s, rate=4000.0 samples/s]
+Loading Trelis/tiny-shakespeare: 100%|##########| 1/1 [00:22<00:00, 22.89s/dataset]
+2024-12-28 23:46:55,555 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
 Loading zxvix/MedicalTextbook:   0%|          | 0/1 [00:00<?, ?dataset/s]
-Generating train split:   0%|          | 0/639 [00:00<?, ? examples/s][AGenerating train split: 100%|##########| 639/639 [00:00<00:00, 22034.45 examples/s]
-Loading zxvix/MedicalTextbook: 100%|##########| 1/1 [00:08<00:00,  8.74s/dataset]
+Generating train split:   0%|          | 0/639 [00:00<?, ? examples/s][AGenerating train split: 100%|##########| 639/639 [00:00<00:00, 23668.17 examples/s]
+Loading zxvix/MedicalTextbook: 100%|##########| 1/1 [00:08<00:00,  8.82s/dataset]
 Processing zxvix/MedicalTextbook:   0%|          | 0/639 [00:00<?, ? samples/s][A
-Processing zxvix/MedicalTextbook:  16%|#5        | 100/639 [00:00<00:00, 12473.40 samples/s, rate=1000.0 samples/s][A
-Processing zxvix/MedicalTextbook:  31%|###1      | 200/639 [00:00<00:00, 14268.04 samples/s, rate=2000.0 samples/s][A
-Processing zxvix/MedicalTextbook:  47%|####6     | 300/639 [00:00<00:00, 14986.79 samples/s, rate=3000.0 samples/s][A
-Processing zxvix/MedicalTextbook:  63%|######2   | 400/639 [00:00<00:00, 15988.81 samples/s, rate=4000.0 samples/s][A
-Processing zxvix/MedicalTextbook:  78%|#######8  | 500/639 [00:00<00:00, 16133.68 samples/s, rate=5000.0 samples/s][A
-Processing zxvix/MedicalTextbook:  94%|#########3| 600/639 [00:00<00:00, 16658.72 samples/s, rate=6000.0 samples/s][AProcessing zxvix/MedicalTextbook: 100%|##########| 639/639 [00:00<00:00, 16808.04 samples/s, rate=6000.0 samples/s]
-Loading zxvix/MedicalTextbook: 100%|##########| 1/1 [00:08<00:00,  8.78s/dataset]
-2024-12-28 22:58:23,086 - INFO - Loading dataset: stas/openwebtext-10k
+Processing zxvix/MedicalTextbook:  16%|#5        | 100/639 [00:00<00:00, 33370.23 samples/s, rate=1000.0 samples/s][A
+Processing zxvix/MedicalTextbook:  31%|###1      | 200/639 [00:00<00:00, 33352.98 samples/s, rate=2000.0 samples/s][A
+Processing zxvix/MedicalTextbook:  47%|####6     | 300/639 [00:00<00:00, 30002.89 samples/s, rate=3000.0 samples/s][A
+Processing zxvix/MedicalTextbook:  63%|######2   | 400/639 [00:00<00:00, 28555.02 samples/s, rate=4000.0 samples/s][A
+Processing zxvix/MedicalTextbook:  78%|#######8  | 500/639 [00:00<00:00, 29412.66 samples/s, rate=5000.0 samples/s][A
+Processing zxvix/MedicalTextbook:  94%|#########3| 600/639 [00:00<00:00, 28574.15 samples/s, rate=6000.0 samples/s][AProcessing zxvix/MedicalTextbook: 100%|##########| 639/639 [00:00<00:00, 29043.78 samples/s, rate=6000.0 samples/s]
+Loading zxvix/MedicalTextbook: 100%|##########| 1/1 [00:08<00:00,  8.84s/dataset]
+2024-12-28 23:47:04,400 - INFO - Loading dataset: stas/openwebtext-10k
 Loading stas/openwebtext-10k:   0%|          | 0/1 [00:00<?, ?dataset/s]
 Generating train split:   0%|          | 0/10000 [00:00<?, ? examples/s][A
-Generating train split:  40%|####      | 4000/10000 [00:00<00:00, 33249.60 examples/s][A
-Generating train split: 100%|##########| 10000/10000 [00:00<00:00, 26377.05 examples/s][AGenerating train split: 100%|##########| 10000/10000 [00:00<00:00, 26902.48 examples/s]
-Loading stas/openwebtext-10k: 100%|##########| 1/1 [00:08<00:00,  8.55s/dataset]
+Generating train split:  40%|####      | 4000/10000 [00:00<00:00, 26258.22 examples/s][A
+Generating train split:  90%|######### | 9000/10000 [00:00<00:00, 33821.21 examples/s][AGenerating train split: 100%|##########| 10000/10000 [00:00<00:00, 32967.58 examples/s]
+Loading stas/openwebtext-10k: 100%|##########| 1/1 [00:08<00:00,  8.06s/dataset]
 Processing stas/openwebtext-10k:   0%|          | 0/10000 [00:00<?, ? samples/s][A
-Processing stas/openwebtext-10k:   1%|1         | 100/10000 [00:00<00:00, 25006.28 samples/s, rate=1000.0 samples/s][A
-Processing stas/openwebtext-10k:   2%|2         | 200/10000 [00:00<00:00, 25003.30 samples/s, rate=2000.0 samples/s][A
-Processing stas/openwebtext-10k:   3%|3         | 300/10000 [00:00<00:00, 27276.48 samples/s, rate=3000.0 samples/s][A
-Processing stas/openwebtext-10k:   4%|4         | 400/10000 [00:00<00:00, 22237.68 samples/s, rate=4000.0 samples/s][A
-Processing stas/openwebtext-10k:   5%|5         | 500/10000 [00:00<00:00, 21751.08 samples/s, rate=5000.0 samples/s][A
-Processing stas/openwebtext-10k:   6%|6         | 600/10000 [00:00<00:00, 21427.75 samples/s, rate=6000.0 samples/s][A
-Processing stas/openwebtext-10k:   7%|7         | 700/10000 [00:00<00:00, 21885.39 samples/s, rate=7000.0 samples/s][A
-Processing stas/openwebtext-10k:   8%|8         | 800/10000 [00:00<00:00, 22231.93 samples/s, rate=8000.0 samples/s][A
-Processing stas/openwebtext-10k:   9%|9         | 900/10000 [00:00<00:00, 22508.47 samples/s, rate=9000.0 samples/s][A
-Processing stas/openwebtext-10k:  10%|#         | 1000/10000 [00:00<00:00, 23262.27 samples/s, rate=10000.0 samples/s][A
-Processing stas/openwebtext-10k:  11%|#1        | 1100/10000 [00:00<00:00, 23412.13 samples/s, rate=11000.0 samples/s][A
-Processing stas/openwebtext-10k:  12%|#2        | 1200/10000 [00:00<00:00, 23536.84 samples/s, rate=12000.0 samples/s][A
-Processing stas/openwebtext-10k:  13%|#3        | 1300/10000 [00:00<00:00, 24081.24 samples/s, rate=13000.0 samples/s][A
-Processing stas/openwebtext-10k:  14%|#4        | 1400/10000 [00:00<00:00, 23733.89 samples/s, rate=14000.0 samples/s][A
-Processing stas/openwebtext-10k:  15%|#5        | 1500/10000 [00:00<00:00, 23815.49 samples/s, rate=15000.0 samples/s][A
-Processing stas/openwebtext-10k:  16%|#6        | 1600/10000 [00:00<00:00, 24248.21 samples/s, rate=16000.0 samples/s][A
-Processing stas/openwebtext-10k:  17%|#7        | 1700/10000 [00:00<00:00, 24291.20 samples/s, rate=17000.0 samples/s][A
-Processing stas/openwebtext-10k:  18%|#8        | 1800/10000 [00:00<00:00, 24329.54 samples/s, rate=18000.0 samples/s][A
-Processing stas/openwebtext-10k:  19%|#9        | 1900/10000 [00:00<00:00, 24363.94 samples/s, rate=19000.0 samples/s][A
-Processing stas/openwebtext-10k:  20%|##        | 2000/10000 [00:00<00:00, 24695.40 samples/s, rate=20000.0 samples/s][A
-Processing stas/openwebtext-10k:  21%|##1       | 2100/10000 [00:00<00:00, 24710.45 samples/s, rate=21000.0 samples/s][A
-Processing stas/openwebtext-10k:  22%|##2       | 2200/10000 [00:00<00:00, 24723.28 samples/s, rate=22000.0 samples/s][A
-Processing stas/openwebtext-10k:  23%|##3       | 2300/10000 [00:00<00:00, 23962.45 samples/s, rate=23000.0 samples/s][A
-Processing stas/openwebtext-10k:  24%|##4       | 2400/10000 [00:00<00:00, 24002.31 samples/s, rate=24000.0 samples/s][A
-Processing stas/openwebtext-10k:  24%|##4       | 2409/10000 [00:00<00:00, 23852.76 samples/s, rate=24000.0 samples/s][A
-Processing stas/openwebtext-10k:  25%|##5       | 2500/10000 [00:00<00:00, 23852.76 samples/s, rate=24039.8 samples/s][A
-Processing stas/openwebtext-10k:  26%|##6       | 2600/10000 [00:00<00:00, 23852.76 samples/s, rate=24075.5 samples/s][A
-Processing stas/openwebtext-10k:  27%|##7       | 2700/10000 [00:00<00:00, 23852.76 samples/s, rate=24325.7 samples/s][A
-Processing stas/openwebtext-10k:  28%|##8       | 2800/10000 [00:00<00:00, 23852.76 samples/s, rate=24349.2 samples/s][A
-Processing stas/openwebtext-10k:  29%|##9       | 2900/10000 [00:00<00:00, 23852.76 samples/s, rate=24371.1 samples/s][A
-Processing stas/openwebtext-10k:  30%|###       | 3000/10000 [00:00<00:00, 23852.76 samples/s, rate=24591.3 samples/s][A
-Processing stas/openwebtext-10k:  31%|###1      | 3100/10000 [00:00<00:00, 23852.76 samples/s, rate=24604.4 samples/s][A
-Processing stas/openwebtext-10k:  32%|###2      | 3200/10000 [00:00<00:00, 23852.76 samples/s, rate=24616.7 samples/s][A
-Processing stas/openwebtext-10k:  33%|###3      | 3300/10000 [00:00<00:00, 23852.76 samples/s, rate=24630.1 samples/s][A
-Processing stas/openwebtext-10k:  34%|###4      | 3400/10000 [00:00<00:00, 23852.76 samples/s, rate=24640.7 samples/s][A
-Processing stas/openwebtext-10k:  35%|###5      | 3500/10000 [00:00<00:00, 23852.76 samples/s, rate=24651.0 samples/s][A
-Processing stas/openwebtext-10k:  36%|###6      | 3600/10000 [00:00<00:00, 23852.76 samples/s, rate=24660.5 samples/s][A
-Processing stas/openwebtext-10k:  37%|###7      | 3700/10000 [00:00<00:00, 23852.76 samples/s, rate=24835.4 samples/s][A
-Processing stas/openwebtext-10k:  38%|###8      | 3800/10000 [00:00<00:00, 23852.76 samples/s, rate=24678.0 samples/s][A
-Processing stas/openwebtext-10k:  39%|###9      | 3900/10000 [00:00<00:00, 23852.76 samples/s, rate=24843.9 samples/s][A
-Processing stas/openwebtext-10k:  40%|####      | 4000/10000 [00:00<00:00, 23852.76 samples/s, rate=24847.4 samples/s][A
-Processing stas/openwebtext-10k:  41%|####1     | 4100/10000 [00:00<00:00, 23852.76 samples/s, rate=24851.4 samples/s][A
-Processing stas/openwebtext-10k:  42%|####2     | 4200/10000 [00:00<00:00, 23852.76 samples/s, rate=24708.7 samples/s][A
-Processing stas/openwebtext-10k:  43%|####3     | 4300/10000 [00:00<00:00, 23852.76 samples/s, rate=24858.3 samples/s][A
-Processing stas/openwebtext-10k:  44%|####4     | 4400/10000 [00:00<00:00, 23852.76 samples/s, rate=24861.4 samples/s][A
-Processing stas/openwebtext-10k:  45%|####5     | 4500/10000 [00:00<00:00, 23852.76 samples/s, rate=24727.5 samples/s][A
-Processing stas/openwebtext-10k:  46%|####6     | 4600/10000 [00:00<00:00, 23852.76 samples/s, rate=24866.8 samples/s][A
-Processing stas/openwebtext-10k:  47%|####6     | 4700/10000 [00:00<00:00, 23852.76 samples/s, rate=24869.8 samples/s][A
-Processing stas/openwebtext-10k:  48%|####8     | 4800/10000 [00:00<00:00, 23852.76 samples/s, rate=24872.9 samples/s][A
-Processing stas/openwebtext-10k:  49%|####9     | 4900/10000 [00:00<00:00, 23852.76 samples/s, rate=24875.5 samples/s][A
-Processing stas/openwebtext-10k:  50%|#####     | 5000/10000 [00:00<00:00, 23852.76 samples/s, rate=24878.0 samples/s][A
-Processing stas/openwebtext-10k:  50%|#####     | 5007/10000 [00:00<00:00, 24954.27 samples/s, rate=24878.0 samples/s][A
-Processing stas/openwebtext-10k:  51%|#####1    | 5100/10000 [00:00<00:00, 24954.27 samples/s, rate=24880.4 samples/s][A
-Processing stas/openwebtext-10k:  52%|#####2    | 5200/10000 [00:00<00:00, 24954.27 samples/s, rate=24882.4 samples/s][A
-Processing stas/openwebtext-10k:  53%|#####3    | 5300/10000 [00:00<00:00, 24954.27 samples/s, rate=24884.9 samples/s][A
-Processing stas/openwebtext-10k:  54%|#####4    | 5400/10000 [00:00<00:00, 24954.27 samples/s, rate=24886.9 samples/s][A
-Processing stas/openwebtext-10k:  55%|#####5    | 5500/10000 [00:00<00:00, 24954.27 samples/s, rate=25002.2 samples/s][A
-Processing stas/openwebtext-10k:  56%|#####6    | 5600/10000 [00:00<00:00, 24954.27 samples/s, rate=25002.1 samples/s][A
-Processing stas/openwebtext-10k:  57%|#####6    | 5700/10000 [00:00<00:00, 24954.27 samples/s, rate=25002.2 samples/s][A
-Processing stas/openwebtext-10k:  58%|#####8    | 5800/10000 [00:00<00:00, 24954.27 samples/s, rate=25001.7 samples/s][A
-Processing stas/openwebtext-10k:  59%|#####8    | 5900/10000 [00:00<00:00, 24954.27 samples/s, rate=25108.4 samples/s][A
-Processing stas/openwebtext-10k:  60%|######    | 6000/10000 [00:00<00:00, 24954.27 samples/s, rate=25106.7 samples/s][A
-Processing stas/openwebtext-10k:  61%|######1   | 6100/10000 [00:00<00:00, 24954.27 samples/s, rate=25104.9 samples/s][A
-Processing stas/openwebtext-10k:  62%|######2   | 6200/10000 [00:00<00:00, 24954.27 samples/s, rate=25103.2 samples/s][A
-Processing stas/openwebtext-10k:  63%|######3   | 6300/10000 [00:00<00:00, 24954.27 samples/s, rate=25001.9 samples/s][A
-Processing stas/openwebtext-10k:  64%|######4   | 6400/10000 [00:00<00:00, 24954.27 samples/s, rate=25099.9 samples/s][A
-Processing stas/openwebtext-10k:  65%|######5   | 6500/10000 [00:00<00:00, 24954.27 samples/s, rate=25098.3 samples/s][A
-Processing stas/openwebtext-10k:  66%|######6   | 6600/10000 [00:00<00:00, 24954.27 samples/s, rate=25096.9 samples/s][A
-Processing stas/openwebtext-10k:  67%|######7   | 6700/10000 [00:00<00:00, 24954.27 samples/s, rate=25094.3 samples/s][A
-Processing stas/openwebtext-10k:  68%|######8   | 6800/10000 [00:00<00:00, 24954.27 samples/s, rate=25092.5 samples/s][A
-Processing stas/openwebtext-10k:  69%|######9   | 6900/10000 [00:00<00:00, 24954.27 samples/s, rate=25091.6 samples/s][A
-Processing stas/openwebtext-10k:  70%|#######   | 7000/10000 [00:00<00:00, 24954.27 samples/s, rate=24911.1 samples/s][A
-Processing stas/openwebtext-10k:  71%|#######1  | 7100/10000 [00:00<00:00, 24954.27 samples/s, rate=24738.7 samples/s][A
-Processing stas/openwebtext-10k:  72%|#######2  | 7200/10000 [00:00<00:00, 24954.27 samples/s, rate=24742.8 samples/s][A
-Processing stas/openwebtext-10k:  73%|#######3  | 7300/10000 [00:00<00:00, 24954.27 samples/s, rate=24660.9 samples/s][A
-Processing stas/openwebtext-10k:  74%|#######4  | 7400/10000 [00:00<00:00, 24954.27 samples/s, rate=24666.1 samples/s][A
-Processing stas/openwebtext-10k:  75%|#######5  | 7500/10000 [00:00<00:00, 24954.27 samples/s, rate=24670.5 samples/s][A
-Processing stas/openwebtext-10k:  75%|#######5  | 7503/10000 [00:00<00:00, 24618.68 samples/s, rate=24670.5 samples/s][A
-Processing stas/openwebtext-10k:  76%|#######6  | 7600/10000 [00:00<00:00, 24618.68 samples/s, rate=24674.8 samples/s][A
-Processing stas/openwebtext-10k:  77%|#######7  | 7700/10000 [00:00<00:00, 24618.68 samples/s, rate=24600.0 samples/s][A
-Processing stas/openwebtext-10k:  78%|#######8  | 7800/10000 [00:00<00:00, 24618.68 samples/s, rate=24605.0 samples/s][A
-Processing stas/openwebtext-10k:  79%|#######9  | 7900/10000 [00:00<00:00, 24618.68 samples/s, rate=24535.1 samples/s][A
-Processing stas/openwebtext-10k:  80%|########  | 8000/10000 [00:00<00:00, 24618.68 samples/s, rate=24465.4 samples/s][A
-Processing stas/openwebtext-10k:  81%|########1 | 8100/10000 [00:00<00:00, 24618.68 samples/s, rate=24253.2 samples/s][A
-Processing stas/openwebtext-10k:  82%|########2 | 8200/10000 [00:00<00:00, 24618.68 samples/s, rate=24119.2 samples/s][A
-Processing stas/openwebtext-10k:  83%|########2 | 8300/10000 [00:00<00:00, 24618.68 samples/s, rate=24059.6 samples/s][A
-Processing stas/openwebtext-10k:  84%|########4 | 8400/10000 [00:00<00:00, 24618.68 samples/s, rate=24070.3 samples/s][A
-Processing stas/openwebtext-10k:  85%|########5 | 8500/10000 [00:00<00:00, 24618.68 samples/s, rate=24080.9 samples/s][A
-Processing stas/openwebtext-10k:  86%|########6 | 8600/10000 [00:00<00:00, 24618.68 samples/s, rate=24023.3 samples/s][A
-Processing stas/openwebtext-10k:  87%|########7 | 8700/10000 [00:00<00:00, 24618.68 samples/s, rate=23967.3 samples/s][A
-Processing stas/openwebtext-10k:  88%|########8 | 8800/10000 [00:00<00:00, 24618.68 samples/s, rate=23913.2 samples/s][A
-Processing stas/openwebtext-10k:  89%|########9 | 8900/10000 [00:00<00:00, 24618.68 samples/s, rate=23925.5 samples/s][A
-Processing stas/openwebtext-10k:  90%|######### | 9000/10000 [00:00<00:00, 24618.68 samples/s, rate=23873.8 samples/s][A
-Processing stas/openwebtext-10k:  91%|#########1| 9100/10000 [00:00<00:00, 24618.68 samples/s, rate=23822.2 samples/s][A
-Processing stas/openwebtext-10k:  92%|#########2| 9200/10000 [00:00<00:00, 24618.68 samples/s, rate=23773.1 samples/s][A
-Processing stas/openwebtext-10k:  93%|#########3| 9300/10000 [00:00<00:00, 24618.68 samples/s, rate=23785.6 samples/s][A
-Processing stas/openwebtext-10k:  94%|#########3| 9400/10000 [00:00<00:00, 24618.68 samples/s, rate=23441.7 samples/s][A
-Processing stas/openwebtext-10k:  95%|#########5| 9500/10000 [00:00<00:00, 24618.68 samples/s, rate=23284.5 samples/s][A
-Processing stas/openwebtext-10k:  96%|#########6| 9600/10000 [00:00<00:00, 24618.68 samples/s, rate=23021.3 samples/s][A
-Processing stas/openwebtext-10k:  97%|#########7| 9700/10000 [00:00<00:00, 24618.68 samples/s, rate=22823.9 samples/s][A
-Processing stas/openwebtext-10k:  98%|#########8| 9800/10000 [00:00<00:00, 24618.68 samples/s, rate=22685.1 samples/s][A
-Processing stas/openwebtext-10k:  99%|#########9| 9900/10000 [00:00<00:00, 24618.68 samples/s, rate=22603.1 samples/s][A
-Processing stas/openwebtext-10k: 100%|#########9| 9966/10000 [00:00<00:00, 21591.16 samples/s, rate=22603.1 samples/s][A
-Processing stas/openwebtext-10k: 100%|##########| 10000/10000 [00:00<00:00, 21591.16 samples/s, rate=22573.7 samples/s][AProcessing stas/openwebtext-10k: 100%|##########| 10000/10000 [00:00<00:00, 22573.75 samples/s, rate=22573.7 samples/s]
-Loading stas/openwebtext-10k: 100%|##########| 1/1 [00:08<00:00,  9.00s/dataset]
-2024-12-28 22:58:32,088 - INFO - Loading dataset: Technoculture/medical-prescriptions
-Loading Technoculture/medical-prescriptions:   0%|          | 0/1 [00:00<?, ?dataset/s]
-Generating train split:   0%|          | 0/400 [00:00<?, ? examples/s][A
-Generating train split:  25%|##5       | 100/400 [00:00<00:00, 595.07 examples/s][A
-Generating train split:  50%|#####     | 200/400 [00:00<00:00, 430.03 examples/s][A
-Generating train split:  75%|#######5  | 300/400 [00:00<00:00, 502.60 examples/s][A
-Generating train split: 100%|##########| 400/400 [00:00<00:00, 538.43 examples/s][AGenerating train split: 100%|##########| 400/400 [00:00<00:00, 516.69 examples/s]
-
-Generating validation split:   0%|          | 0/100 [00:00<?, ? examples/s][A
-Generating validation split: 100%|##########| 100/100 [00:00<00:00, 769.17 examples/s][AGenerating validation split: 100%|##########| 100/100 [00:00<00:00, 757.52 examples/s]
-
-Generating test split:   0%|          | 0/100 [00:00<?, ? examples/s][A
-Generating test split: 100%|##########| 100/100 [00:00<00:00, 414.66 examples/s][AGenerating test split: 100%|##########| 100/100 [00:00<00:00, 411.23 examples/s]
-Loading Technoculture/medical-prescriptions: 100%|##########| 1/1 [00:29<00:00, 29.46s/dataset]
-Processing Technoculture/medical-prescriptions:   0%|          | 0/400 [00:00<?, ? samples/s][A
-Processing Technoculture/medical-prescriptions:   1%|1         | 4/400 [00:00<00:13, 29.41 samples/s][A
-Processing Technoculture/medical-prescriptions:   2%|1         | 7/400 [00:00<00:13, 28.13 samples/s][A
-Processing Technoculture/medical-prescriptions:   2%|2         | 10/400 [00:00<00:13, 28.66 samples/s][A
-Processing Technoculture/medical-prescriptions:   3%|3         | 13/400 [00:00<00:13, 28.63 samples/s][A
-Processing Technoculture/medical-prescriptions:   4%|4         | 17/400 [00:00<00:13, 29.40 samples/s][A
-Processing Technoculture/medical-prescriptions:   5%|5         | 20/400 [00:00<00:13, 28.24 samples/s][A
-Processing Technoculture/medical-prescriptions:   6%|5         | 23/400 [00:00<00:13, 27.78 samples/s][A
-Processing Technoculture/medical-prescriptions:   7%|6         | 27/400 [00:00<00:12, 29.36 samples/s][A
-Processing Technoculture/medical-prescriptions:   8%|7         | 31/400 [00:01<00:12, 30.22 samples/s][A
-Processing Technoculture/medical-prescriptions:   9%|8         | 35/400 [00:01<00:12, 28.19 samples/s][A
-Processing Technoculture/medical-prescriptions:  10%|9         | 38/400 [00:01<00:12, 28.43 samples/s][A
-Processing Technoculture/medical-prescriptions:  10%|#         | 42/400 [00:01<00:12, 29.03 samples/s][A
-Processing Technoculture/medical-prescriptions:  11%|#1        | 45/400 [00:01<00:12, 28.19 samples/s][A
-Processing Technoculture/medical-prescriptions:  12%|#2        | 48/400 [00:01<00:13, 26.98 samples/s][A
-Processing Technoculture/medical-prescriptions:  13%|#2        | 51/400 [00:01<00:14, 24.92 samples/s][A
-Processing Technoculture/medical-prescriptions:  14%|#3        | 54/400 [00:01<00:13, 25.67 samples/s][A
-Processing Technoculture/medical-prescriptions:  14%|#4        | 58/400 [00:02<00:12, 27.66 samples/s][A
-Processing Technoculture/medical-prescriptions:  16%|#5        | 62/400 [00:02<00:11, 29.12 samples/s][A
-Processing Technoculture/medical-prescriptions:  16%|#6        | 66/400 [00:02<00:11, 29.85 samples/s][A
-Processing Technoculture/medical-prescriptions:  17%|#7        | 69/400 [00:02<00:11, 29.14 samples/s][A
-Processing Technoculture/medical-prescriptions:  18%|#8        | 73/400 [00:02<00:10, 29.87 samples/s][A
-Processing Technoculture/medical-prescriptions:  19%|#9        | 77/400 [00:02<00:10, 30.67 samples/s][A
-Processing Technoculture/medical-prescriptions:  20%|##        | 81/400 [00:02<00:10, 31.23 samples/s][A
-Processing Technoculture/medical-prescriptions:  21%|##1       | 85/400 [00:02<00:10, 31.16 samples/s][A
-Processing Technoculture/medical-prescriptions:  22%|##2       | 89/400 [00:03<00:10, 30.53 samples/s][A
-Processing Technoculture/medical-prescriptions:  23%|##3       | 93/400 [00:03<00:09, 31.41 samples/s][A
-Processing Technoculture/medical-prescriptions:  24%|##4       | 97/400 [00:03<00:09, 31.66 samples/s][A
-Processing Technoculture/medical-prescriptions:  25%|##5       | 100/400 [00:03<00:09, 31.66 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  25%|##5       | 101/400 [00:03<00:09, 30.95 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  26%|##6       | 105/400 [00:03<00:10, 27.33 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  27%|##7       | 109/400 [00:03<00:10, 28.49 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  28%|##8       | 113/400 [00:03<00:09, 28.75 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  29%|##9       | 117/400 [00:04<00:09, 29.46 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  30%|###       | 121/400 [00:04<00:09, 30.25 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  31%|###1      | 125/400 [00:04<00:08, 30.75 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  32%|###2      | 129/400 [00:04<00:08, 30.27 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  33%|###3      | 133/400 [00:04<00:08, 30.63 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  34%|###4      | 137/400 [00:04<00:08, 31.24 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  35%|###5      | 141/400 [00:04<00:08, 31.54 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  36%|###6      | 145/400 [00:04<00:08, 30.24 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  37%|###7      | 149/400 [00:05<00:08, 30.19 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  38%|###8      | 153/400 [00:05<00:08, 30.78 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  39%|###9      | 157/400 [00:05<00:07, 30.77 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  40%|####      | 161/400 [00:05<00:09, 26.49 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  41%|####1     | 164/400 [00:05<00:09, 23.89 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  42%|####1     | 167/400 [00:05<00:10, 22.10 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  43%|####2     | 171/400 [00:05<00:09, 24.56 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  44%|####3     | 175/400 [00:06<00:08, 26.53 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  44%|####4     | 178/400 [00:06<00:08, 25.72 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  45%|####5     | 181/400 [00:06<00:08, 26.43 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  46%|####6     | 184/400 [00:06<00:07, 27.12 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  47%|####6     | 188/400 [00:06<00:07, 28.56 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  48%|####8     | 192/400 [00:06<00:07, 29.43 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  49%|####9     | 196/400 [00:06<00:06, 30.06 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  50%|#####     | 200/400 [00:06<00:06, 30.50 samples/s, rate=29.3 samples/s][A
-Processing Technoculture/medical-prescriptions:  50%|#####     | 200/400 [00:06<00:06, 30.50 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  51%|#####1    | 204/400 [00:07<00:06, 30.58 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  52%|#####2    | 208/400 [00:07<00:06, 28.56 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  53%|#####3    | 212/400 [00:07<00:06, 29.73 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  54%|#####4    | 216/400 [00:07<00:06, 28.24 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  55%|#####4    | 219/400 [00:07<00:07, 22.87 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  56%|#####5    | 222/400 [00:07<00:08, 21.63 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  56%|#####6    | 225/400 [00:08<00:08, 21.45 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  57%|#####7    | 229/400 [00:08<00:07, 24.16 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  58%|#####8    | 232/400 [00:08<00:07, 23.03 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  59%|#####8    | 235/400 [00:08<00:07, 21.71 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  60%|#####9    | 238/400 [00:08<00:07, 22.60 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  60%|######    | 241/400 [00:08<00:07, 21.60 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  61%|######1   | 244/400 [00:08<00:07, 21.30 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  62%|######1   | 247/400 [00:09<00:08, 17.62 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  62%|######2   | 249/400 [00:09<00:08, 18.02 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  63%|######3   | 252/400 [00:09<00:07, 20.25 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  64%|######4   | 256/400 [00:09<00:06, 23.30 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  65%|######5   | 260/400 [00:09<00:05, 25.24 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  66%|######6   | 264/400 [00:09<00:05, 26.67 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  67%|######7   | 268/400 [00:09<00:04, 27.56 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  68%|######8   | 272/400 [00:09<00:04, 28.31 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  69%|######8   | 275/400 [00:10<00:05, 23.21 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  70%|######9   | 278/400 [00:10<00:05, 24.07 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  70%|#######   | 281/400 [00:10<00:05, 23.38 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  71%|#######1  | 284/400 [00:10<00:05, 20.27 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  72%|#######1  | 287/400 [00:10<00:05, 21.93 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  72%|#######2  | 290/400 [00:10<00:04, 22.69 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  73%|#######3  | 293/400 [00:10<00:04, 23.49 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  74%|#######4  | 296/400 [00:11<00:04, 24.43 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  75%|#######4  | 299/400 [00:11<00:04, 22.92 samples/s, rate=28.8 samples/s][A
-Processing Technoculture/medical-prescriptions:  75%|#######5  | 300/400 [00:11<00:04, 22.92 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  76%|#######5  | 302/400 [00:11<00:04, 22.46 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  76%|#######6  | 305/400 [00:11<00:04, 22.64 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  77%|#######7  | 309/400 [00:11<00:03, 25.38 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  78%|#######8  | 312/400 [00:11<00:03, 25.10 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  79%|#######8  | 315/400 [00:11<00:03, 23.09 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  80%|#######9  | 318/400 [00:12<00:04, 19.66 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  80%|########  | 321/400 [00:12<00:03, 21.06 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  81%|########1 | 324/400 [00:12<00:03, 21.66 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  82%|########1 | 327/400 [00:12<00:03, 21.14 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  83%|########2 | 331/400 [00:12<00:02, 23.73 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  84%|########3 | 334/400 [00:12<00:02, 24.74 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  84%|########4 | 337/400 [00:12<00:02, 24.69 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  85%|########5 | 340/400 [00:13<00:02, 23.44 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  86%|########6 | 344/400 [00:13<00:02, 23.37 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  87%|########6 | 347/400 [00:13<00:02, 20.39 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  88%|########7 | 350/400 [00:13<00:02, 19.04 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  88%|########8 | 354/400 [00:13<00:02, 22.22 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  90%|########9 | 358/400 [00:13<00:01, 24.44 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  90%|######### | 362/400 [00:13<00:01, 25.74 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  91%|#########1| 365/400 [00:14<00:01, 26.23 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  92%|#########2| 369/400 [00:14<00:01, 27.57 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  93%|#########3| 373/400 [00:14<00:00, 27.45 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  94%|#########3| 376/400 [00:14<00:00, 25.34 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  95%|#########4| 379/400 [00:14<00:00, 24.37 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  96%|#########5| 382/400 [00:14<00:00, 22.89 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  96%|#########6| 385/400 [00:14<00:00, 24.08 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  97%|#########7| 389/400 [00:15<00:00, 26.37 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  98%|#########8| 393/400 [00:15<00:00, 28.27 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions:  99%|#########9| 396/400 [00:15<00:00, 26.38 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions: 100%|#########9| 399/400 [00:15<00:00, 25.75 samples/s, rate=26.6 samples/s][A
-Processing Technoculture/medical-prescriptions: 100%|##########| 400/400 [00:15<00:00, 25.75 samples/s, rate=25.9 samples/s][AProcessing Technoculture/medical-prescriptions: 100%|##########| 400/400 [00:15<00:00, 25.92 samples/s, rate=25.9 samples/s]
-Loading Technoculture/medical-prescriptions: 100%|##########| 1/1 [00:44<00:00, 44.90s/dataset]
-2024-12-28 22:59:17,014 - INFO - Processing dataset: local
-2024-12-28 22:59:17,031 - INFO - Processing dataset: medical_textbook
-2024-12-28 22:59:17,031 - INFO - Processing dataset: openwebtext
-2024-12-28 22:59:17,036 - INFO - Training tokenizer on 10814 texts
+Processing stas/openwebtext-10k:   1%|1         | 100/10000 [00:00<00:00, 14297.46 samples/s, rate=1000.0 samples/s][A
+Processing stas/openwebtext-10k:   2%|2         | 200/10000 [00:00<00:00, 13332.39 samples/s, rate=2000.0 samples/s][A
+Processing stas/openwebtext-10k:   3%|3         | 300/10000 [00:00<00:00, 12499.66 samples/s, rate=3000.0 samples/s][A
+Processing stas/openwebtext-10k:   4%|4         | 400/10000 [00:00<00:00, 10807.00 samples/s, rate=4000.0 samples/s][A
+Processing stas/openwebtext-10k:   5%|5         | 500/10000 [00:00<00:00, 11107.50 samples/s, rate=5000.0 samples/s][A
+Processing stas/openwebtext-10k:   6%|6         | 600/10000 [00:00<00:00, 10908.70 samples/s, rate=6000.0 samples/s][A
+Processing stas/openwebtext-10k:   7%|7         | 700/10000 [00:00<00:00, 9332.65 samples/s, rate=7000.0 samples/s] [A
+Processing stas/openwebtext-10k:   8%|8         | 800/10000 [00:00<00:01, 8510.20 samples/s, rate=8000.0 samples/s][A
+Processing stas/openwebtext-10k:   9%|8         | 874/10000 [00:00<00:01, 8739.70 samples/s, rate=8000.0 samples/s][A
+Processing stas/openwebtext-10k:   9%|9         | 900/10000 [00:00<00:01, 8739.70 samples/s, rate=8822.8 samples/s][A
+Processing stas/openwebtext-10k:  10%|#         | 1000/10000 [00:00<00:01, 8739.70 samples/s, rate=7999.4 samples/s][A
+Processing stas/openwebtext-10k:  11%|#1        | 1100/10000 [00:00<00:01, 8739.70 samples/s, rate=8208.5 samples/s][A
+Processing stas/openwebtext-10k:  12%|#2        | 1200/10000 [00:00<00:01, 8739.70 samples/s, rate=7842.9 samples/s][A
+Processing stas/openwebtext-10k:  13%|#3        | 1300/10000 [00:00<00:00, 8739.70 samples/s, rate=8024.0 samples/s][A
+Processing stas/openwebtext-10k:  14%|#4        | 1400/10000 [00:00<00:00, 8739.70 samples/s, rate=8092.5 samples/s][A
+Processing stas/openwebtext-10k:  15%|#5        | 1500/10000 [00:00<00:00, 8739.70 samples/s, rate=8081.6 samples/s][A
+Processing stas/openwebtext-10k:  16%|#6        | 1600/10000 [00:00<00:00, 8739.70 samples/s, rate=8056.0 samples/s][A
+Processing stas/openwebtext-10k:  17%|#7        | 1700/10000 [00:00<00:00, 8739.70 samples/s, rate=8149.5 samples/s][A
+Processing stas/openwebtext-10k:  17%|#7        | 1748/10000 [00:00<00:01, 7919.93 samples/s, rate=8149.5 samples/s][A
+Processing stas/openwebtext-10k:  18%|#8        | 1800/10000 [00:00<00:01, 7919.93 samples/s, rate=8122.8 samples/s][A
+Processing stas/openwebtext-10k:  19%|#9        | 1900/10000 [00:00<00:01, 7919.93 samples/s, rate=8133.6 samples/s][A
+Processing stas/openwebtext-10k:  20%|##        | 2000/10000 [00:00<00:01, 7919.93 samples/s, rate=8143.0 samples/s][A
+Processing stas/openwebtext-10k:  21%|##1       | 2100/10000 [00:00<00:00, 7919.93 samples/s, rate=7876.8 samples/s][A
+Processing stas/openwebtext-10k:  22%|##2       | 2200/10000 [00:00<00:00, 7919.93 samples/s, rate=7924.8 samples/s][A
+Processing stas/openwebtext-10k:  23%|##3       | 2300/10000 [00:00<00:00, 7919.93 samples/s, rate=7997.2 samples/s][A
+Processing stas/openwebtext-10k:  24%|##4       | 2400/10000 [00:00<00:00, 7919.93 samples/s, rate=8037.5 samples/s][A
+Processing stas/openwebtext-10k:  25%|##5       | 2500/10000 [00:00<00:00, 7919.93 samples/s, rate=8100.8 samples/s][A
+Processing stas/openwebtext-10k:  26%|##5       | 2595/10000 [00:00<00:00, 8122.63 samples/s, rate=8100.8 samples/s][A
+Processing stas/openwebtext-10k:  26%|##6       | 2600/10000 [00:00<00:00, 8122.63 samples/s, rate=8109.8 samples/s][A
+Processing stas/openwebtext-10k:  27%|##7       | 2700/10000 [00:00<00:00, 8122.63 samples/s, rate=8045.3 samples/s][A
+Processing stas/openwebtext-10k:  28%|##8       | 2800/10000 [00:00<00:00, 8122.63 samples/s, rate=8008.9 samples/s][A
+Processing stas/openwebtext-10k:  29%|##9       | 2900/10000 [00:00<00:00, 8122.63 samples/s, rate=8109.6 samples/s][A
+Processing stas/openwebtext-10k:  30%|###       | 3000/10000 [00:00<00:00, 8122.63 samples/s, rate=8161.0 samples/s][A
+Processing stas/openwebtext-10k:  31%|###1      | 3100/10000 [00:00<00:00, 8122.63 samples/s, rate=8231.4 samples/s][A
+Processing stas/openwebtext-10k:  32%|###2      | 3200/10000 [00:00<00:00, 8122.63 samples/s, rate=8277.3 samples/s][A
+Processing stas/openwebtext-10k:  33%|###3      | 3300/10000 [00:00<00:00, 8122.63 samples/s, rate=8341.6 samples/s][A
+Processing stas/openwebtext-10k:  34%|###4      | 3400/10000 [00:00<00:00, 8122.63 samples/s, rate=8321.0 samples/s][A
+Processing stas/openwebtext-10k:  35%|###4      | 3484/10000 [00:00<00:00, 8382.50 samples/s, rate=8321.0 samples/s][A
+Processing stas/openwebtext-10k:  35%|###5      | 3500/10000 [00:00<00:00, 8382.50 samples/s, rate=8262.5 samples/s][A
+Processing stas/openwebtext-10k:  36%|###6      | 3600/10000 [00:00<00:00, 8382.50 samples/s, rate=8245.5 samples/s][A
+Processing stas/openwebtext-10k:  37%|###7      | 3700/10000 [00:00<00:00, 8382.50 samples/s, rate=8322.1 samples/s][A
+Processing stas/openwebtext-10k:  38%|###8      | 3800/10000 [00:00<00:00, 8382.50 samples/s, rate=8322.4 samples/s][A
+Processing stas/openwebtext-10k:  39%|###9      | 3900/10000 [00:00<00:00, 8382.50 samples/s, rate=8340.4 samples/s][A
+Processing stas/openwebtext-10k:  40%|####      | 4000/10000 [00:00<00:00, 8382.50 samples/s, rate=8375.1 samples/s][A
+Processing stas/openwebtext-10k:  41%|####1     | 4100/10000 [00:00<00:00, 8382.50 samples/s, rate=8425.7 samples/s][A
+Processing stas/openwebtext-10k:  42%|####2     | 4200/10000 [00:00<00:00, 8382.50 samples/s, rate=8457.3 samples/s][A
+Processing stas/openwebtext-10k:  43%|####3     | 4300/10000 [00:00<00:00, 8382.50 samples/s, rate=8388.6 samples/s][A
+Processing stas/openwebtext-10k:  44%|####3     | 4376/10000 [00:00<00:00, 8541.55 samples/s, rate=8388.6 samples/s][A
+Processing stas/openwebtext-10k:  44%|####4     | 4400/10000 [00:00<00:00, 8541.55 samples/s, rate=8419.4 samples/s][A
+Processing stas/openwebtext-10k:  45%|####5     | 4500/10000 [00:00<00:00, 8541.55 samples/s, rate=8497.0 samples/s][A
+Processing stas/openwebtext-10k:  46%|####6     | 4600/10000 [00:00<00:00, 8541.55 samples/s, rate=8556.6 samples/s][A
+Processing stas/openwebtext-10k:  47%|####6     | 4700/10000 [00:00<00:00, 8541.55 samples/s, rate=8630.0 samples/s][A
+Processing stas/openwebtext-10k:  48%|####8     | 4800/10000 [00:00<00:00, 8541.55 samples/s, rate=8639.4 samples/s][A
+Processing stas/openwebtext-10k:  49%|####9     | 4900/10000 [00:00<00:00, 8541.55 samples/s, rate=8678.7 samples/s][A
+Processing stas/openwebtext-10k:  50%|#####     | 5000/10000 [00:00<00:00, 8541.55 samples/s, rate=8701.8 samples/s][A
+Processing stas/openwebtext-10k:  51%|#####1    | 5100/10000 [00:00<00:00, 8541.55 samples/s, rate=8769.0 samples/s][A
+Processing stas/openwebtext-10k:  52%|#####2    | 5200/10000 [00:00<00:00, 8541.55 samples/s, rate=8864.7 samples/s][A
+Processing stas/openwebtext-10k:  53%|#####3    | 5300/10000 [00:00<00:00, 8541.55 samples/s, rate=8943.7 samples/s][A
+Processing stas/openwebtext-10k:  54%|#####4    | 5400/10000 [00:00<00:00, 8541.55 samples/s, rate=9051.3 samples/s][A
+Processing stas/openwebtext-10k:  55%|#####5    | 5500/10000 [00:00<00:00, 8541.55 samples/s, rate=9096.8 samples/s][A
+Processing stas/openwebtext-10k:  56%|#####6    | 5600/10000 [00:00<00:00, 8541.55 samples/s, rate=9111.6 samples/s][A
+Processing stas/openwebtext-10k:  57%|#####6    | 5681/10000 [00:00<00:00, 10011.72 samples/s, rate=9111.6 samples/s][A
+Processing stas/openwebtext-10k:  57%|#####6    | 5700/10000 [00:00<00:00, 10011.72 samples/s, rate=9155.0 samples/s][A
+Processing stas/openwebtext-10k:  58%|#####8    | 5800/10000 [00:00<00:00, 10011.72 samples/s, rate=9212.1 samples/s][A
+Processing stas/openwebtext-10k:  59%|#####8    | 5900/10000 [00:00<00:00, 10011.72 samples/s, rate=9267.8 samples/s][A
+Processing stas/openwebtext-10k:  60%|######    | 6000/10000 [00:00<00:00, 10011.72 samples/s, rate=9337.1 samples/s][A
+Processing stas/openwebtext-10k:  61%|######1   | 6100/10000 [00:00<00:00, 10011.72 samples/s, rate=9405.0 samples/s][A
+Processing stas/openwebtext-10k:  62%|######2   | 6200/10000 [00:00<00:00, 10011.72 samples/s, rate=9471.4 samples/s][A
+Processing stas/openwebtext-10k:  63%|######3   | 6300/10000 [00:00<00:00, 10011.72 samples/s, rate=9536.7 samples/s][A
+Processing stas/openwebtext-10k:  64%|######4   | 6400/10000 [00:00<00:00, 10011.72 samples/s, rate=9615.5 samples/s][A
+Processing stas/openwebtext-10k:  65%|######5   | 6500/10000 [00:00<00:00, 10011.72 samples/s, rate=9664.1 samples/s][A
+Processing stas/openwebtext-10k:  66%|######6   | 6600/10000 [00:00<00:00, 10011.72 samples/s, rate=9740.4 samples/s][A
+Processing stas/openwebtext-10k:  67%|######7   | 6700/10000 [00:00<00:00, 10011.72 samples/s, rate=9801.1 samples/s][A
+Processing stas/openwebtext-10k:  68%|######8   | 6800/10000 [00:00<00:00, 10011.72 samples/s, rate=9860.9 samples/s][A
+Processing stas/openwebtext-10k:  69%|######9   | 6900/10000 [00:00<00:00, 10011.72 samples/s, rate=9905.3 samples/s][A
+Processing stas/openwebtext-10k:  70%|#######   | 7000/10000 [00:00<00:00, 10011.72 samples/s, rate=9963.1 samples/s][A
+Processing stas/openwebtext-10k:  71%|#######1  | 7100/10000 [00:00<00:00, 10011.72 samples/s, rate=10005.7 samples/s][A
+Processing stas/openwebtext-10k:  72%|#######2  | 7200/10000 [00:00<00:00, 10011.72 samples/s, rate=10089.8 samples/s][A
+Processing stas/openwebtext-10k:  73%|#######3  | 7300/10000 [00:00<00:00, 10011.72 samples/s, rate=10158.7 samples/s][A
+Processing stas/openwebtext-10k:  74%|#######3  | 7374/10000 [00:00<00:00, 12200.19 samples/s, rate=10158.7 samples/s][A
+Processing stas/openwebtext-10k:  74%|#######4  | 7400/10000 [00:00<00:00, 12200.19 samples/s, rate=10226.7 samples/s][A
+Processing stas/openwebtext-10k:  75%|#######5  | 7500/10000 [00:00<00:00, 12200.19 samples/s, rate=10279.5 samples/s][A
+Processing stas/openwebtext-10k:  76%|#######6  | 7600/10000 [00:00<00:00, 12200.19 samples/s, rate=10360.0 samples/s][A
+Processing stas/openwebtext-10k:  77%|#######7  | 7700/10000 [00:00<00:00, 12200.19 samples/s, rate=10411.1 samples/s][A
+Processing stas/openwebtext-10k:  78%|#######8  | 7800/10000 [00:00<00:00, 12200.19 samples/s, rate=10461.4 samples/s][A
+Processing stas/openwebtext-10k:  79%|#######9  | 7900/10000 [00:00<00:00, 12200.19 samples/s, rate=10483.0 samples/s][A
+Processing stas/openwebtext-10k:  80%|########  | 8000/10000 [00:00<00:00, 12200.19 samples/s, rate=10490.5 samples/s][A
+Processing stas/openwebtext-10k:  81%|########1 | 8100/10000 [00:00<00:00, 12200.19 samples/s, rate=10525.0 samples/s][A
+Processing stas/openwebtext-10k:  82%|########2 | 8200/10000 [00:00<00:00, 12200.19 samples/s, rate=10599.7 samples/s][A
+Processing stas/openwebtext-10k:  83%|########2 | 8300/10000 [00:00<00:00, 12200.19 samples/s, rate=10646.4 samples/s][A
+Processing stas/openwebtext-10k:  84%|########4 | 8400/10000 [00:00<00:00, 12200.19 samples/s, rate=10706.2 samples/s][A
+Processing stas/openwebtext-10k:  85%|########5 | 8500/10000 [00:00<00:00, 12200.19 samples/s, rate=10765.0 samples/s][A
+Processing stas/openwebtext-10k:  86%|########6 | 8600/10000 [00:00<00:00, 12200.19 samples/s, rate=10823.0 samples/s][A
+Processing stas/openwebtext-10k:  87%|########7 | 8700/10000 [00:00<00:00, 12200.19 samples/s, rate=10894.1 samples/s][A
+Processing stas/openwebtext-10k:  88%|########8 | 8800/10000 [00:00<00:00, 12200.19 samples/s, rate=10950.6 samples/s][A
+Processing stas/openwebtext-10k:  89%|########9 | 8900/10000 [00:00<00:00, 12200.19 samples/s, rate=11006.5 samples/s][A
+Processing stas/openwebtext-10k:  90%|######### | 9000/10000 [00:00<00:00, 12200.19 samples/s, rate=11034.8 samples/s][A
+Processing stas/openwebtext-10k:  91%|#########1| 9100/10000 [00:00<00:00, 12200.19 samples/s, rate=11075.8 samples/s][A
+Processing stas/openwebtext-10k:  91%|#########1| 9108/10000 [00:00<00:00, 13815.52 samples/s, rate=11075.8 samples/s][A
+Processing stas/openwebtext-10k:  92%|#########2| 9200/10000 [00:00<00:00, 13815.52 samples/s, rate=11089.6 samples/s][A
+Processing stas/openwebtext-10k:  93%|#########3| 9300/10000 [00:00<00:00, 13815.52 samples/s, rate=11143.1 samples/s][A
+Processing stas/openwebtext-10k:  94%|#########3| 9400/10000 [00:00<00:00, 13815.52 samples/s, rate=11209.2 samples/s][A
+Processing stas/openwebtext-10k:  95%|#########5| 9500/10000 [00:00<00:00, 13815.52 samples/s, rate=11261.3 samples/s][A
+Processing stas/openwebtext-10k:  96%|#########6| 9600/10000 [00:00<00:00, 13815.52 samples/s, rate=11326.1 samples/s][A
+Processing stas/openwebtext-10k:  97%|#########7| 9700/10000 [00:00<00:00, 13815.52 samples/s, rate=11390.4 samples/s][A
+Processing stas/openwebtext-10k:  98%|#########8| 9800/10000 [00:00<00:00, 13815.52 samples/s, rate=11467.5 samples/s][A
+Processing stas/openwebtext-10k:  99%|#########9| 9900/10000 [00:00<00:00, 13815.52 samples/s, rate=11530.5 samples/s][A
+Processing stas/openwebtext-10k: 100%|##########| 10000/10000 [00:00<00:00, 13815.52 samples/s, rate=11606.5 samples/s][AProcessing stas/openwebtext-10k: 100%|##########| 10000/10000 [00:00<00:00, 11593.01 samples/s, rate=11606.5 samples/s]
+Loading stas/openwebtext-10k: 100%|##########| 1/1 [00:08<00:00,  8.92s/dataset]
+2024-12-28 23:47:13,329 - INFO - Processing dataset: local
+2024-12-28 23:47:13,349 - INFO - Processing dataset: medical_textbook
+2024-12-28 23:47:13,349 - INFO - Processing dataset: openwebtext
+2024-12-28 23:47:13,353 - INFO - Training tokenizer on 10814 texts
 
 
 
-2024-12-28 22:59:35,715 - INFO - Tokenizer saved to data\processed\tokenizer\tokenizer.json
+2024-12-28 23:47:32,855 - INFO - Tokenizer saved to data\processed\tokenizer\tokenizer.json
 Tokenizer training completed successfully. Saved to data\processed\tokenizer\tokenizer.json

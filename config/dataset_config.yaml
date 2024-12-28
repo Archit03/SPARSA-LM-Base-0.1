@@ -2,7 +2,7 @@ datasets:
 - name: local
   type: local
   config:
-    path: "C:/Users/ASUS/Desktop/LuminaLM/Data"
+    path: "C:/Users/ASUS/Desktop/LuminaLM-base-0.1/data/raw"
     patterns: 
       - "*.txt"
       - "*.csv"
@@ -30,10 +30,4 @@ datasets:
     split: "train"
     cache_dir: "cache/openwebtext"
 
-- name: medical_prescriptions
-  type: huggingface
-  config:
-    dataset_name: "Technoculture/medical-prescriptions"
-    split: "train"
-    cache_dir: "cache/medical_prescriptions"
 
