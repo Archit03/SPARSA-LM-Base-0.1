@@ -32,12 +32,12 @@ setup(
         'pytorch-lightning',
 
     ],
-    author="Your Name",
-    author_email="your.email@example.com",
-    description="A short description of your package",
+    author="Archit Sood @ EllanorAI",
+    author_email="architsood@ellanorai.org",
+    description="This is a Base LM package for Lumina",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/your-repo",
+    url="https://github.com/Archit03/LuminaLM-base-0.1",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: Proprietary License",
