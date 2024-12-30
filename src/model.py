@@ -15,7 +15,7 @@ class InputEmbedding(nn.Module):
     
     def forward(self, x):
         """ Input Embedding Forward Pass """
-        return self.embedding(x) * torch.sqrt(self.d_model)
+        return self.embedding(x) * torch.sqrt(torch.tensor(self.d_model, dtype=torch.float))
 
 class PositionalEncoding(nn.Module):
     """ Positional Encoding for Transformer """
@@ -29,7 +29,7 @@ class PositionalEncoding(nn.Module):
 
         #Create a vector of shape (seq_len, 1) and (1, d_model)
         position = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np. log(10000.0) / d_model))
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
 
         #Apply the sin to even postions in the vector
         pe[:, 0::2] = torch.sin(position * div_term)
@@ -97,6 +97,8 @@ class MultiHeadAttention(nn.Module):
         self.w_v = nn.Linear(d_model, d_model) #Value
 
         self.w_o = nn.Linear(d_model, d_model) #Output
+        self.dropout = nn.Dropout(dropout)
+
     @staticmethod
     def attention(query, key, value, mask, dropout: nn.Dropout):
         """ Scaled Dot-Product Attention """
@@ -118,8 +120,8 @@ class MultiHeadAttention(nn.Module):
 
         #Split the query, key and value into h heads
         query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1,2)
-        key = query.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1,2)
-        value = query.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1,2)
+        key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1,2)
+        value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1,2)
 
         x, self.attention_scores = MultiHeadAttention.attention(query, key, value, mask, self.dropout)
 
@@ -127,5 +129,5 @@ class MultiHeadAttention(nn.Module):
         x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
 
         return self.w_o(x)
-    
-## Transformer Encoder Layer 
+
+## Transformer Encoder Layer
