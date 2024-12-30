@@ -128,3 +128,4 @@ class MultiHeadAttention(nn.Module):
 
         return self.w_o(x)
     
+## Transformer Encoder Layer 
