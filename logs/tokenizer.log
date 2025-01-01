@@ -1,0 +1,8 @@
+2025-01-01 19:41:22,726 - INFO - Loading dataset: Trelis/tiny-shakespeare
+2025-01-01 19:41:39,054 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
+2025-01-01 19:41:46,371 - INFO - Loading dataset: stas/openwebtext-10k
+2025-01-01 19:41:49,815 - INFO - Processing dataset: local
+2025-01-01 19:41:49,834 - INFO - Processing dataset: medical_textbook
+2025-01-01 19:41:49,834 - INFO - Processing dataset: openwebtext
+2025-01-01 19:41:49,838 - INFO - Training tokenizer on 10814 texts
+2025-01-01 19:42:06,840 - INFO - Tokenizer saved to data\processed\tokenizer\tokenizer.json
