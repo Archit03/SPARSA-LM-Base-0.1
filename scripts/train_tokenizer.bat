@@ -4,11 +4,11 @@ setlocal enabledelayedexpansion
 :: Set environment variables
 set PYTHON_PATH=python
 set SCRIPT_PATH=src\tokenizer.py
-set LOG_DIR=C:\Users\ASUS\Desktop\LuminaLM-base-0.1\logs
-set VOCAB_SIZE=60000
+set LOG_DIR=C:\Users\ASUS\Desktop\SPARSA-LM-Base 0.1\logs
+set VOCAB_SIZE=32000
 set MIN_FREQ=2
-set DATASET_CONFIG=C:\Users\ASUS\Desktop\LuminaLM-base-0.1\config\dataset_config.yaml
-set CACHE_DIR=C:\Users\ASUS\Desktop\LuminaLM-base-0.1\data\processed\cache
+set DATASET_CONFIG=C:\Users\ASUS\Desktop\SPARSA-LM-Base 0.1\config\dataset_config.yaml
+set CACHE_DIR=C:\Users\ASUS\Desktop\SPARSA-LM-Base 0.1\data\processed\cache
 
 :: Create logs directory if it doesn't exist
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
@@ -44,7 +44,8 @@ echo - Cache Directory: %CACHE_DIR%
 echo - Log Directory: %LOG_DIR%
 echo.
 
-%PYTHON_PATH% %SCRIPT_PATH% --vocab-size %VOCAB_SIZE% --min-frequency %MIN_FREQ% --dataset-config %DATASET_CONFIG% --cache-dir %CACHE_DIR% --log-dir %LOG_DIR% > "%LOG_DIR%\tokenizer_output.log" 2>&1
+:: Updated command with proper argument flags and quoted paths
+%PYTHON_PATH% %SCRIPT_PATH% --vocab-size %VOCAB_SIZE% --min-frequency %MIN_FREQ% --dataset-config "%DATASET_CONFIG%" --cache-dir "%CACHE_DIR%" --log-dir "%LOG_DIR%" > "%LOG_DIR%\tokenizer_output.log" 2>&1
 
 if errorlevel 1 (
     echo Error: Tokenizer training failed. Check %LOG_DIR%\tokenizer.log for details.

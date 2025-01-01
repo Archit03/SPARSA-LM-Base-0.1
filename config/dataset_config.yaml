@@ -2,7 +2,7 @@ datasets:
 - name: local
   type: local
   config:
-    path: "C:/Users/ASUS/Desktop/LuminaLM-base-0.1/data/raw"
+    path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/raw"
     patterns: 
       - "*.txt"
       - "*.csv"

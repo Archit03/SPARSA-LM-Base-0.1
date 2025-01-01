@@ -1,23 +1,13 @@
-2024-12-28 23:10:15,486 - INFO - Loading dataset: Trelis/tiny-shakespeare
-2024-12-28 23:10:41,422 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
-2024-12-28 23:10:50,945 - INFO - Loading dataset: stas/openwebtext-10k
-2024-12-28 23:10:58,323 - INFO - Loading dataset: Technoculture/medical-prescriptions
-2024-12-28 23:11:41,835 - INFO - Processing dataset: local
-2024-12-28 23:11:41,850 - INFO - Processing dataset: medical_textbook
-2024-12-28 23:11:41,850 - INFO - Processing dataset: openwebtext
-2024-12-28 23:11:41,853 - INFO - Training tokenizer on 10814 texts
-2024-12-28 23:12:01,156 - INFO - Tokenizer saved to data\processed\tokenizer\tokenizer.json
-2024-12-28 23:43:39,930 - ERROR - Local dataset path does not exist: r"C:\Users\ASUS\Desktop\LuminaLM-base-0.1\data\raw"
-2024-12-28 23:43:39,931 - ERROR - Error during tokenizer training: Invalid dataset configuration
-2024-12-28 23:44:40,066 - ERROR - Error during tokenizer training: while scanning a double-quoted scalar
-  in "C:\Users\ASUS\Desktop\LuminaLM-base-0.1\config\dataset_config.yaml", line 5, column 11
-expected escape sequence of 8 hexadecimal numbers, but found 's'
-  in "C:\Users\ASUS\Desktop\LuminaLM-base-0.1\config\dataset_config.yaml", line 5, column 16
-2024-12-28 23:46:32,669 - INFO - Loading dataset: Trelis/tiny-shakespeare
-2024-12-28 23:46:55,555 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
-2024-12-28 23:47:04,400 - INFO - Loading dataset: stas/openwebtext-10k
-2024-12-28 23:47:13,329 - INFO - Processing dataset: local
-2024-12-28 23:47:13,349 - INFO - Processing dataset: medical_textbook
-2024-12-28 23:47:13,349 - INFO - Processing dataset: openwebtext
-2024-12-28 23:47:13,353 - INFO - Training tokenizer on 10814 texts
-2024-12-28 23:47:32,855 - INFO - Tokenizer saved to data\processed\tokenizer\tokenizer.json
+2025-01-01 18:17:29,361 - ERROR - Local dataset path does not exist: C:\Users\ASUS\Desktop\LuminaLM-base-0.1\data\raw
+2025-01-01 18:17:29,361 - ERROR - Error during tokenizer training: Invalid dataset configuration
+2025-01-01 18:19:43,917 - ERROR - Error during tokenizer training: while scanning for the next token
+found character '`' that cannot start any token
+  in "C:\Users\ASUS\Desktop\SPARSA-LM-Base 0.1\config\dataset_config.yaml", line 6, column 15
+2025-01-01 18:20:33,023 - INFO - Loading dataset: Trelis/tiny-shakespeare
+2025-01-01 18:20:53,891 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
+2025-01-01 18:21:02,110 - INFO - Loading dataset: stas/openwebtext-10k
+2025-01-01 18:21:07,752 - INFO - Processing dataset: local
+2025-01-01 18:21:07,768 - INFO - Processing dataset: medical_textbook
+2025-01-01 18:21:07,769 - INFO - Processing dataset: openwebtext
+2025-01-01 18:21:07,772 - INFO - Training tokenizer on 10814 texts
+2025-01-01 18:21:25,675 - INFO - Tokenizer saved to data\processed\tokenizer\tokenizer.json
