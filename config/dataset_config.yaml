@@ -27,4 +27,10 @@ datasets:
     dataset_name: "stas/openwebtext-10k"
     cache_dir: "cache/openwebtext"
 
+- name: Abirate
+  type: huggingface
+  config:
+    dataset_name: "Abirate/english_quotes"
+    cache_dir: "cache/abirate"
+
 

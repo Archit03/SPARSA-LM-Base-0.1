@@ -44,8 +44,8 @@ echo - Cache Directory: %CACHE_DIR%
 echo - Log Directory: %LOG_DIR%
 echo.
 
-:: Updated command with proper argument flags and quoted paths
-%PYTHON_PATH% %SCRIPT_PATH% --vocab-size %VOCAB_SIZE% --min-frequency %MIN_FREQ% --dataset-config "%DATASET_CONFIG%" --cache-dir "%CACHE_DIR%" --log-dir "%LOG_DIR%" > "%LOG_DIR%\tokenizer_output.log" 2>&1
+:: Run command and display output while logging
+%PYTHON_PATH% %SCRIPT_PATH% --vocab-size %VOCAB_SIZE% --min-frequency %MIN_FREQ% --dataset-config "%DATASET_CONFIG%" --cache-dir "%CACHE_DIR%" --log-dir "%LOG_DIR%" > "%LOG_DIR%\tokenizer_output.log" 2>&1 & type "%LOG_DIR%\tokenizer_output.log"
 
 if errorlevel 1 (
     echo Error: Tokenizer training failed. Check %LOG_DIR%\tokenizer.log for details.
