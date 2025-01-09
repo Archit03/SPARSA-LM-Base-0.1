@@ -1,0 +1,18 @@
+- name: shakespeare
+  type: huggingface
+  config:
+    dataset_name: "Trelis/tiny-shakespeare"
+    cache_dir: "cache/shakespeare"
+
+- name: Abirate
+  type: huggingface
+  config:
+    dataset_name: "Abirate/english_quotes"
+    cache_dir: "cache/abirate"
+
+- name: wikipedia
+  type: huggingface
+  config:
+    dataset_name: "wikitext-103"
+    cache_dir: "cache/wikipedia"
+

@@ -1,0 +1,16 @@
+2025-01-04 08:49:48,556 - INFO - Loading dataset: zxvix/MedicalTextbook with config: Anatomy_Gray
+2025-01-04 08:50:02,587 - INFO - Loading dataset: stas/openwebtext-10k
+2025-01-04 08:50:07,256 - INFO - Loading dataset: hari560/medical-data
+2025-01-04 08:50:13,030 - INFO - Loading dataset: Trelis/tiny-shakespeare
+2025-01-04 08:50:29,608 - INFO - Loading dataset: Abirate/english_quotes
+2025-01-04 08:50:35,131 - INFO - Loading dataset: tchebonenko/MedicalTranscriptions
+2025-01-04 08:50:36,094 - WARNING - Repo card metadata block was not found. Setting CardData to empty.
+2025-01-04 08:50:42,764 - INFO - Loading dataset: lavita/medical-qa-shared-task-v1-toy
+2025-01-04 08:51:01,821 - INFO - Loading dataset: owkin/medical_knowledge_from_extracts
+2025-01-04 08:51:07,717 - INFO - Loading dataset: ymoslem/MedicalSciences-StackExchange
+2025-01-04 08:51:14,407 - INFO - Processing dataset: local
+2025-01-04 08:51:14,437 - INFO - Processing dataset: medical_textbook
+2025-01-04 08:51:14,438 - INFO - Processing dataset: openwebtext
+2025-01-04 08:51:14,442 - INFO - Processing dataset: hari560
+2025-01-04 08:51:14,445 - INFO - Training tokenizer on 15814 texts
+2025-01-04 08:51:31,949 - INFO - Tokenizer saved to C:\Users\ASUS\Desktop\SPARSA-LM-Base 0.1\data\processed\tokenizer\tokenizer.json
