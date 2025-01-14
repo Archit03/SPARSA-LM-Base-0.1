@@ -36,5 +36,5 @@ def remove_duplicates(directory):
     print(f"Completed. Total duplicates removed: {len(duplicates)}")
 
 # Specify the directory to scan
-directory_to_scan = r"C:\Users\ASUS\Desktop\PreProcessed"
+directory_to_scan = r"C:\Users\ASUS\Desktop\PreProcessed\processed"
 remove_duplicates(directory_to_scan)
