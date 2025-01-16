@@ -2,14 +2,11 @@ import os
 import re
 import logging
 from pathlib import Path
+from pqdm.processes import pqdm
 import torch
-import aiofiles
-import asyncio
 import unicodedata
 import time
 from typing import List
-from concurrent.futures import ProcessPoolExecutor
-from tqdm import tqdm
 
 class GPUAcademicTextCleanerOptimized:
     def __init__(self, memory_fraction: float = 0.8):
@@ -42,10 +39,10 @@ class GPUAcademicTextCleanerOptimized:
         return text.strip()
 
 class GPUAcademicTextPreprocessor:
-    def __init__(self, input_dir: str, output_dir: str, batch_size: int = 50):
+    def __init__(self, input_dir: str, output_dir: str, max_workers: int = 4):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
-        self.batch_size = batch_size
+        self.max_workers = max_workers
         self.cleaner = GPUAcademicTextCleanerOptimized()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.setup_logging()
@@ -63,55 +60,50 @@ class GPUAcademicTextPreprocessor:
         self.logger = logging.getLogger(__name__)
         self.logger.info("Logger initialized for GPUAcademicTextPreprocessor")
 
-    async def read_file_async(self, file_path: Path) -> str:
-        """Asynchronously read a .txt file."""
-        async with aiofiles.open(file_path, mode='r', encoding='utf-8') as f:
-            return await f.read()
+    def read_file(self, file_path: Path) -> str:
+        """Read a .txt file."""
+        try:
+            with open(file_path, mode='r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            self.logger.error(f"Error reading file {file_path}: {e}")
+            return ""
 
-    async def write_file_async(self, file_path: Path, content: str):
-        """Asynchronously write content to a file."""
-        async with aiofiles.open(file_path, mode='w', encoding='utf-8') as f:
-            await f.write(content)
+    def write_file(self, file_path: Path, content: str):
+        """Write content to a file."""
+        try:
+            with open(file_path, mode='w', encoding='utf-8') as f:
+                f.write(content)
+        except Exception as e:
+            self.logger.error(f"Error writing file {file_path}: {e}")
 
-    async def process_file(self, file_path: Path):
+    def process_file(self, file_path: Path):
         """Process a single .txt file with detailed logging."""
         self.logger.info(f"Starting to process file: {file_path.name}")
         try:
-            text = await self.read_file_async(file_path)
+            text = self.read_file(file_path)
             cleaned_text = self.cleaner.clean_text(text)
             output_path = self.output_dir / f"{file_path.stem}_cleaned.txt"
-            await self.write_file_async(output_path, cleaned_text)
+            self.write_file(output_path, cleaned_text)
             self.logger.info(f"Successfully processed file: {file_path.name}")
         except Exception as e:
             self.logger.error(f"Error processing file {file_path.name}: {e}")
 
-    async def process_files_in_batches(self):
-        """Process .txt files in parallel batches with detailed logging."""
+    def process_all_files(self):
+        """Process all .txt files using pqdm for parallel processing."""
         files = list(self.input_dir.glob("*.txt"))
         self.logger.info(f"Found {len(files)} .txt files to process.")
 
-        for i in range(0, len(files), self.batch_size):
-            batch = files[i:i + self.batch_size]
-            self.logger.info(f"Processing batch {i // self.batch_size + 1} with {len(batch)} files.")
-            tasks = [self.process_file(file) for file in batch]
+        def process_wrapper(file_path):
+            self.process_file(file_path)
 
-            start_time = time.time()
-            await asyncio.gather(*tasks)
-            end_time = time.time()
-
-            self.logger.info(f"Finished processing batch {i // self.batch_size + 1} in {end_time - start_time:.2f} seconds.")
-
-    def process_all(self):
-        """Process all .txt files."""
-        self.logger.info("Starting .txt file processing.")
-        asyncio.run(self.process_files_in_batches())
-        self.logger.info("Finished processing all .txt files.")
+        pqdm(files, process_wrapper, n_jobs=self.max_workers, desc="Processing files")
 
 # Usage
 if __name__ == "__main__":
     processor = GPUAcademicTextPreprocessor(
-        input_dir=r"C:\Users\ASUS\Desktop\PreProcessed\processed\en",  # Directory containing the downloaded C4 .txt files
-        output_dir=r"C:\Users\ASUS\Desktop\PreProcessed\processed\en\C4Dataset",  # Directory for cleaned output
-        batch_size=50  # Adjust batch size as per GPU memory
+        input_dir=r"C:\\Users\\ASUS\\Desktop\\C4Dataset",  # Directory containing the downloaded C4 .txt files
+        output_dir=r"C:\\Users\\ASUS\\Desktop\\C4Dataset\\cleaned",  # Directory for cleaned output
+        max_workers=8  # Adjust number of workers as per system capability
     )
-    processor.process_all()
+    processor.process_all_files()
