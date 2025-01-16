@@ -18,10 +18,12 @@ class GPUAcademicTextCleanerOptimized:
         self.setup_patterns()
 
     def setup_patterns(self):
-        """Compile patterns for academic text cleaning."""
+        """Compile patterns for text cleaning."""
         self.patterns = {
             "urls": re.compile(r'http[s]?://\S+'),
             "emails": re.compile(r'[\w.-]+@[\w.-]+\.\w+'),
+            "html_tags": re.compile(r'<.*?>'),
+            "non_ascii": re.compile(r'[\x80-\xFF]+'),
             "references": re.compile(r'\[\d+(?:,\s*\d+)*\]'),
             "multiple_spaces": re.compile(r' {2,}'),
             "multiple_newlines": re.compile(r'\n{3,}')
@@ -32,6 +34,8 @@ class GPUAcademicTextCleanerOptimized:
         text = unicodedata.normalize('NFKC', text)
         text = self.patterns["urls"].sub('', text)
         text = self.patterns["emails"].sub('', text)
+        text = self.patterns["html_tags"].sub('', text)
+        text = self.patterns["non_ascii"].sub('', text)
         text = self.patterns["references"].sub('', text)
         text = self.patterns["multiple_spaces"].sub(' ', text)
         text = self.patterns["multiple_newlines"].sub('\n\n', text)
@@ -53,7 +57,7 @@ class GPUAcademicTextPreprocessor:
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.StreamHandler(),
-                logging.FileHandler('logs/text_preprocessing.log')
+                logging.FileHandler('logs/c4_text_preprocessing.log')
             ]
         )
         self.logger = logging.getLogger(__name__)
@@ -106,8 +110,8 @@ class GPUAcademicTextPreprocessor:
 # Usage
 if __name__ == "__main__":
     processor = GPUAcademicTextPreprocessor(
-        input_dir=r"C:\Users\ASUS\Desktop\PreProcessed",
-        output_dir=r"C:\Users\ASUS\Desktop\PreProcessed\cleaned",
+        input_dir=r"C:\Users\ASUS\Desktop\PreProcessed\processed\en",  # Directory containing the downloaded C4 .txt files
+        output_dir=r"C:\Users\ASUS\Desktop\PreProcessed\processed\en\C4Dataset",  # Directory for cleaned output
         batch_size=50  # Adjust batch size as per GPU memory
     )
     processor.process_all()
