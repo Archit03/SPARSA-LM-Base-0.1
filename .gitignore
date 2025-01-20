@@ -2,3 +2,5 @@ llm
 cache
 logs/text_cleaning_detailed.log
 logs
+scripts/.env
+.webui_secret_key

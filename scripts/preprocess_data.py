@@ -1,109 +1,169 @@
-import os
+import gc
 import re
-import logging
-from pathlib import Path
-from pqdm.processes import pqdm
 import torch
+import logging
+import hashlib
+import json
+import numpy as np
+from pathlib import Path
+from typing import Dict, List, Optional, Union
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 import unicodedata
-import time
-from typing import List
+from collections import defaultdict, Counter
+import sys
+from datetime import datetime
+import signal
+import queue
+from threading import Event, Lock
+import psutil
+import warnings
+import pickle
+from functools import lru_cache
+import mmap
+import ftfy
+from contextlib import contextmanager
 
-class GPUAcademicTextCleanerOptimized:
-    def __init__(self, memory_fraction: float = 0.8):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.cuda.set_per_process_memory_fraction(memory_fraction)
-        self.setup_patterns()
 
-    def setup_patterns(self):
-        """Compile patterns for text cleaning."""
+class MLTextConfig:
+    """Configuration for ML-specific text preprocessing."""
+
+    def __init__(self):
+        self.max_sequence_length = 2048
+        self.min_sequence_length = 8
+        self.special_tokens = {
+            'pad': '[PAD]',
+            'unk': '[UNK]',
+            'mask': '[MASK]',
+            'bos': '[BOS]',
+            'eos': '[EOS]',
+            'sep': '[SEP]',
+            'url': '[URL]',
+            'email': '[EMAIL]',
+            'phone': '[PHONE]',
+            'number': '[NUMBER]',
+            'date': '[DATE]',
+            'time': '[TIME]',
+            'entity': '[ENTITY]'
+        }
+        self.preserve_patterns = {
+            'latex': r'\$[^$]+\$|\\\([^)]+\\\)|\\\[[^\]]+\\\]',
+            'code_block': r'```[^`]+```',
+            'inline_code': r'`[^`]+`',
+            'markdown_header': r'^#{1,6}\s.*$',
+            'list_item': r'^[-*+]\s.*$',
+            'quote': r'^>\s.*$',
+            'table': r'\|[^|]+\|'
+        }
+        self.excluded_chars = set('\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f')
+
+
+class MLTextProcessor:
+    """Advanced text processor optimized for ML training data."""
+
+    def __init__(self, config: MLTextConfig):
+        self.config = config
+        self._setup_regex_patterns()
+
+    def _setup_regex_patterns(self):
+        """Compile regex patterns for efficient text processing."""
         self.patterns = {
-            "urls": re.compile(r'http[s]?://\S+'),
-            "emails": re.compile(r'[\w.-]+@[\w.-]+\.\w+'),
-            "html_tags": re.compile(r'<.*?>'),
-            "non_ascii": re.compile(r'[\x80-\xFF]+'),
-            "references": re.compile(r'\[\d+(?:,\s*\d+)*\]'),
-            "multiple_spaces": re.compile(r' {2,}'),
-            "multiple_newlines": re.compile(r'\n{3,}')
+            name: re.compile(pattern, re.MULTILINE)
+            for name, pattern in self.config.preserve_patterns.items()
         }
 
-    def clean_text(self, text: str) -> str:
-        """Clean a single text string."""
-        text = unicodedata.normalize('NFKC', text)
-        text = self.patterns["urls"].sub('', text)
-        text = self.patterns["emails"].sub('', text)
-        text = self.patterns["html_tags"].sub('', text)
-        text = self.patterns["non_ascii"].sub('', text)
-        text = self.patterns["references"].sub('', text)
-        text = self.patterns["multiple_spaces"].sub(' ', text)
-        text = self.patterns["multiple_newlines"].sub('\n\n', text)
+    def normalize_unicode(self, text: str) -> str:
+        """Normalize Unicode text."""
+        return ftfy.fix_text(text)
+
+    def process_text(self, text: str) -> str:
+        """Process text with ML-specific optimizations."""
+        text = self.normalize_unicode(text)
+        text = self._remove_excluded_chars(text)
+        text = self._apply_ml_transformations(text)
+        return text
+
+    def _remove_excluded_chars(self, text: str) -> str:
+        """Remove unwanted characters."""
+        return ''.join(c for c in text if c not in self.config.excluded_chars)
+
+    def _apply_ml_transformations(self, text: str) -> str:
+        """Apply ML-specific transformations."""
+        text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
         return text.strip()
 
-class GPUAcademicTextPreprocessor:
-    def __init__(self, input_dir: str, output_dir: str, max_workers: int = 4):
+
+class MLFileProcessor:
+    """Process files with ML-specific optimizations."""
+
+    def __init__(self, input_dir: Path, output_dir: Path, config: MLTextConfig):
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
-        self.max_workers = max_workers
-        self.cleaner = GPUAcademicTextCleanerOptimized()
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.setup_logging()
+        self.processor = MLTextProcessor(config)
+        self.stop_event = Event()
+        self.error_queue = queue.Queue()
 
-    def setup_logging(self):
-        """Set up detailed logging."""
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.StreamHandler(),
-                logging.FileHandler('logs/c4_text_preprocessing.log')
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
-        self.logger.info("Logger initialized for GPUAcademicTextPreprocessor")
+        # Setup signal handlers
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
 
-    def read_file(self, file_path: Path) -> str:
-        """Read a .txt file."""
-        try:
-            with open(file_path, mode='r', encoding='utf-8') as f:
-                return f.read()
-        except Exception as e:
-            self.logger.error(f"Error reading file {file_path}: {e}")
-            return ""
+    def _signal_handler(self, signum, frame):
+        """Handle termination signals."""
+        logging.warning(f"Received termination signal {signum}. Stopping processing...")
+        self.stop_event.set()
 
-    def write_file(self, file_path: Path, content: str):
-        """Write content to a file."""
-        try:
-            with open(file_path, mode='w', encoding='utf-8') as f:
-                f.write(content)
-        except Exception as e:
-            self.logger.error(f"Error writing file {file_path}: {e}")
+    def process_directory(self, max_workers: Optional[int] = None):
+        """Process directory with ML optimizations."""
+        input_files = list(self.input_dir.rglob('*.txt'))
 
-    def process_file(self, file_path: Path):
-        """Process a single .txt file with detailed logging."""
-        self.logger.info(f"Starting to process file: {file_path.name}")
-        try:
-            text = self.read_file(file_path)
-            cleaned_text = self.cleaner.clean_text(text)
-            output_path = self.output_dir / f"{file_path.stem}_cleaned.txt"
-            self.write_file(output_path, cleaned_text)
-            self.logger.info(f"Successfully processed file: {file_path.name}")
-        except Exception as e:
-            self.logger.error(f"Error processing file {file_path.name}: {e}")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for file in input_files:
+                if self.stop_event.is_set():
+                    break
+                future = executor.submit(self._process_file, file)
+                futures.append(future)
 
-    def process_all_files(self):
-        """Process all .txt files using pqdm for parallel processing."""
-        files = list(self.input_dir.glob("*.txt"))
-        self.logger.info(f"Found {len(files)} .txt files to process.")
+            with tqdm(total=len(futures), desc="Processing files") as pbar:
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                        pbar.update(1)
+                    except Exception as e:
+                        self.error_queue.put(str(e))
+                        pbar.update(1)
 
-        def process_wrapper(file_path):
-            self.process_file(file_path)
+    def _process_file(self, input_path: Path) -> None:
+        """Process individual file."""
+        relative_path = input_path.relative_to(self.input_dir)
+        output_path = self.output_dir / relative_path
 
-        pqdm(files, process_wrapper, n_jobs=self.max_workers, desc="Processing files")
+        with input_path.open('r', encoding='utf-8', errors='replace') as infile:
+            text = infile.read()
 
-# Usage
-if __name__ == "__main__":
-    processor = GPUAcademicTextPreprocessor(
-        input_dir=r"C:\\Users\\ASUS\\Desktop\\C4Dataset",  # Directory containing the downloaded C4 .txt files
-        output_dir=r"C:\\Users\\ASUS\\Desktop\\C4Dataset\\cleaned",  # Directory for cleaned output
-        max_workers=8  # Adjust number of workers as per system capability
+        processed_text = self.processor.process_text(text)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open('w', encoding='utf-8', newline='\n') as outfile:
+            outfile.write(processed_text)
+
+
+def main():
+    """Main execution function."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler(), logging.FileHandler('ml_processing.log')]
     )
-    processor.process_all_files()
+
+    config = MLTextConfig()
+    input_directory = Path(r"C:\Users\ASUS\Desktop\PreProcessed\processed\pubmed")
+    output_directory = Path(r"C:\Users\ASUS\Desktop\PreProcessed\processed\cleaned")
+
+    processor = MLFileProcessor(input_directory, output_directory, config)
+    processor.process_directory()
+
+
+if __name__ == "__main__":
+    main()
