@@ -1,6 +1,6 @@
 from .tokenizer import MedicalTokenizer
 from .dataset import DatasetProcessor
-from .model import TokenFormerModel
+from .model import Transformer
 from .training import Trainer
 from .evaluation import Evaluate_Model
 from inference import generate_text
