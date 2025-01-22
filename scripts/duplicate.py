@@ -95,6 +95,6 @@ def remove_duplicate_pdfs(directory):
 
 # Specify the directory to scan
 if __name__ == "__main__":
-    directory_to_scan = r"D:\PubMed"  # Change this to your target directory
+    directory_to_scan = r"D:\PubMed\new"  # Change this to your target directory
     remove_duplicate_pdfs(directory_to_scan)
 

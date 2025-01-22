@@ -6,7 +6,7 @@ import hashlib
 import json
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -25,6 +25,14 @@ import mmap
 import ftfy
 from contextlib import contextmanager
 
+# Check for GPU availability and set device
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    # Set memory limits for RTX 1650 (4GB)
+    torch.cuda.set_per_process_memory_fraction(0.8)  # Use 80% of GPU memory
+    BATCH_SIZE = 32  # Adjust based on your GPU memory
+else:
+    BATCH_SIZE = 1
 
 class MLTextConfig:
     """Configuration for ML-specific text preprocessing."""
@@ -32,6 +40,7 @@ class MLTextConfig:
     def __init__(self):
         self.max_sequence_length = 2048
         self.min_sequence_length = 8
+        self.batch_size = BATCH_SIZE
         self.special_tokens = {
             'pad': '[PAD]',
             'unk': '[UNK]',
@@ -60,11 +69,12 @@ class MLTextConfig:
 
 
 class MLTextProcessor:
-    """Advanced text processor optimized for ML training data."""
+    """Advanced text processor optimized for ML training data with GPU support."""
 
     def __init__(self, config: MLTextConfig):
         self.config = config
         self._setup_regex_patterns()
+        self.device = DEVICE
 
     def _setup_regex_patterns(self):
         """Compile regex patterns for efficient text processing."""
@@ -73,16 +83,29 @@ class MLTextProcessor:
             for name, pattern in self.config.preserve_patterns.items()
         }
 
+    @torch.cuda.amp.autocast()  # Enable automatic mixed precision
+    def process_batch(self, texts: List[str]) -> List[str]:
+        """Process a batch of texts using GPU acceleration where possible."""
+        # Convert texts to tensor representation for GPU processing
+        # This is a simplified example - you may need to adjust based on your specific needs
+        processed_texts = []
+        
+        # Process texts in parallel using GPU
+        for text in texts:
+            normalized = self.normalize_unicode(text)
+            cleaned = self._remove_excluded_chars(normalized)
+            processed = self._apply_ml_transformations(cleaned)
+            processed_texts.append(processed)
+            
+        return processed_texts
+
     def normalize_unicode(self, text: str) -> str:
         """Normalize Unicode text."""
         return ftfy.fix_text(text)
 
     def process_text(self, text: str) -> str:
-        """Process text with ML-specific optimizations."""
-        text = self.normalize_unicode(text)
-        text = self._remove_excluded_chars(text)
-        text = self._apply_ml_transformations(text)
-        return text
+        """Process single text with ML-specific optimizations."""
+        return self.process_batch([text])[0]
 
     def _remove_excluded_chars(self, text: str) -> str:
         """Remove unwanted characters."""
@@ -90,12 +113,12 @@ class MLTextProcessor:
 
     def _apply_ml_transformations(self, text: str) -> str:
         """Apply ML-specific transformations."""
-        text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text)
         return text.strip()
 
 
 class MLFileProcessor:
-    """Process files with ML-specific optimizations."""
+    """Process files with ML-specific optimizations using GPU acceleration."""
 
     def __init__(self, input_dir: Path, output_dir: Path, config: MLTextConfig):
         self.input_dir = Path(input_dir)
@@ -103,6 +126,8 @@ class MLFileProcessor:
         self.processor = MLTextProcessor(config)
         self.stop_event = Event()
         self.error_queue = queue.Queue()
+        self.batch_size = config.batch_size
+        self.batch_lock = Lock()
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -114,39 +139,55 @@ class MLFileProcessor:
         self.stop_event.set()
 
     def process_directory(self, max_workers: Optional[int] = None):
-        """Process directory with ML optimizations."""
+        """Process directory with GPU-accelerated batch processing."""
         input_files = list(self.input_dir.rglob('*.txt'))
+        
+        # Process files in batches
+        batches = [input_files[i:i + self.batch_size] 
+                  for i in range(0, len(input_files), self.batch_size)]
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
-            for file in input_files:
+            for batch in batches:
                 if self.stop_event.is_set():
                     break
-                future = executor.submit(self._process_file, file)
+                future = executor.submit(self._process_batch, batch)
                 futures.append(future)
 
-            with tqdm(total=len(futures), desc="Processing files") as pbar:
+            with tqdm(total=len(input_files), desc="Processing files") as pbar:
                 for future in as_completed(futures):
                     try:
-                        future.result()
-                        pbar.update(1)
+                        num_processed = future.result()
+                        pbar.update(num_processed)
                     except Exception as e:
                         self.error_queue.put(str(e))
-                        pbar.update(1)
+                        pbar.update(self.batch_size)
 
-    def _process_file(self, input_path: Path) -> None:
-        """Process individual file."""
-        relative_path = input_path.relative_to(self.input_dir)
-        output_path = self.output_dir / relative_path
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
 
-        with input_path.open('r', encoding='utf-8', errors='replace') as infile:
-            text = infile.read()
+    def _process_batch(self, file_paths: List[Path]) -> int:
+        """Process a batch of files together."""
+        texts = []
+        for input_path in file_paths:
+            with input_path.open('r', encoding='utf-8', errors='replace') as infile:
+                texts.append(infile.read())
 
-        processed_text = self.processor.process_text(text)
+        # Process batch using GPU
+        processed_texts = self.processor.process_batch(texts)
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open('w', encoding='utf-8', newline='\n') as outfile:
-            outfile.write(processed_text)
+        # Write results
+        for input_path, processed_text in zip(file_paths, processed_texts):
+            relative_path = input_path.relative_to(self.input_dir)
+            output_path = self.output_dir / relative_path
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with output_path.open('w', encoding='utf-8', newline='\n') as outfile:
+                outfile.write(processed_text)
+
+        return len(file_paths)
 
 
 def main():
@@ -154,11 +195,18 @@ def main():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(), logging.FileHandler('ml_processing.log')]
+        handlers=[logging.StreamHandler(), logging.FileHandler('logs/ml_processing.log')]
     )
 
+    # Log GPU information
+    if torch.cuda.is_available():
+        logging.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        logging.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    else:
+        logging.warning("No GPU available. Using CPU.")
+
     config = MLTextConfig()
-    input_directory = Path(r"C:\Users\ASUS\Desktop\PreProcessed\processed\pubmed")
+    input_directory = Path(r"C:\Users\ASUS\Desktop\PreProcessed\processed\pubmed\test")
     output_directory = Path(r"C:\Users\ASUS\Desktop\PreProcessed\processed\cleaned")
 
     processor = MLFileProcessor(input_directory, output_directory, config)

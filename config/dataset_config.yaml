@@ -3,7 +3,7 @@ datasets:
 - name: local
   type: local
   config:
-    path: "C:/Users/ASUS/Desktop/PreProcessed"
+    path: "C:/Users/ASUS/Desktop/PreProcessed/processed/tokenize"
     patterns: 
       - "*.txt"
       - "*.csv"

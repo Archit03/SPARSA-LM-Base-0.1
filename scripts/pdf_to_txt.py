@@ -211,6 +211,6 @@ def batch_convert_pdfs(input_dir: str, output_dir: str):
             print(f"- {filename}: {error}")
 
 if __name__ == "__main__":
-    input_directory = r"D:\PubMed"
-    output_directory = r"C:\Users\ASUS\Desktop\PreProcessed\processed\pubmed"
+    input_directory = r"C:\Users\ASUS\Downloads\pdf"
+    output_directory = r"C:\Users\ASUS\Desktop\PreProcessed\processed\pubmed\test"
     batch_convert_pdfs(input_directory, output_directory)

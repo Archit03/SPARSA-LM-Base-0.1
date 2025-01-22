@@ -1888,31 +1888,44 @@ def load_dataset_from_config(config: dict) -> Optional[Any]:
         return None
 
 def process_streaming_dataset(dataset: Any, output_path: Path, chunk_size: int, dataset_name: str) -> Optional[str]:
-    """Process streaming dataset with immediate processing."""
+    """Process streaming dataset with memory-efficient handling"""
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        buffer_size = 1024 * 1024 * 8  # 8MB buffer
-        
-        total = len(dataset) if hasattr(dataset, '__len__') else None
-        
-        with open(output_path, 'w', encoding='utf-8', buffering=buffer_size) as f:
-            with tqdm(total=total, desc=f"Processing {dataset_name}", unit=" samples") as pbar:
+        batch_processor = BatchProcessor()
+        buffer: List[str] = []
+        total_processed = 0
+
+        with open(output_path, 'w', encoding='utf-8', buffering=8*1024*1024) as f:  # 8MB buffer
+            with tqdm(desc=f"Processing {dataset_name}", unit=" samples") as pbar:
                 for item in dataset:
                     if isinstance(item, dict):
                         text = item.get('text', '')
                     else:
                         text = str(item)
-                        
+
                     if text:
-                        f.write(text + '\n')
-                        pbar.update(1)
-                        
-                        # Update rate every 100 samples
-                        if pbar.n % 100 == 0:
-                            pbar.set_postfix({'rate': f'{pbar.n/pbar.elapsed:.1f} samples/s'})
-        
+                        buffer.append(text)
+                        if len(buffer) >= chunk_size:
+                            batch_processor.process_batch(buffer)
+                            f.write('\n'.join(buffer) + '\n')
+                            total_processed += len(buffer)
+                            pbar.update(len(buffer))
+                            buffer.clear()
+                            
+                            # Force garbage collection if memory usage is high
+                            if psutil.virtual_memory().percent > 90:
+                                gc.collect()
+
+                # Process remaining items
+                if buffer:
+                    batch_processor.process_batch(buffer)
+                    f.write('\n'.join(buffer) + '\n')
+                    total_processed += len(buffer)
+                    pbar.update(len(buffer))
+
+        batch_processor.wait_completion()
         return str(output_path)
-            
+
     except Exception as e:
         logging.error(f"Error processing dataset {dataset_name}: {str(e)}")
         return None
@@ -2229,43 +2242,67 @@ class DatasetLogger:
 
 # Add optimized batch processor
 class BatchProcessor:
-    """Efficient batch processing with parallel execution"""
+    """Efficient batch processing with memory-aware execution"""
     
-    def __init__(self, max_workers: int = 16, batch_size: int = 10000):
-        self.max_workers = max_workers
-        self.batch_size = batch_size
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+    def __init__(self, max_workers: Optional[int] = None, batch_size: Optional[int] = None):
+        self.max_workers = max_workers or min(16, multiprocessing.cpu_count())
+        self.batch_size = batch_size or self._calculate_optimal_batch_size()
+        self.executor = None
         self.pending_futures = []
-        
+        self.memory_monitor = MemoryManager()
+
+    def _calculate_optimal_batch_size(self) -> int:
+        """Calculate optimal batch size based on available memory"""
+        available_memory = psutil.virtual_memory().available
+        # Estimate 1KB per text item
+        estimated_item_size = 1024
+        # Use 20% of available memory
+        target_memory = available_memory * 0.2
+        return max(1000, min(int(target_memory / estimated_item_size), 50000))
+
     def process_batch(self, batch: List[str]) -> None:
-        """Process a batch of texts in parallel"""
-        future = self.executor.submit(self._process_batch, batch)
-        self.pending_futures.append(future)
-        
-        # Clean up completed futures
+        """Process a batch of texts with memory monitoring"""
+        if self.memory_monitor.check_memory()[0]:
+            # If memory usage is high, process synchronously
+            self._process_batch(batch)
+            return
+
+        if self.executor is None:
+            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+
+        # Split batch if it's too large
+        for sub_batch in self._split_batch(batch):
+            future = self.executor.submit(self._process_batch, sub_batch)
+            self.pending_futures.append(future)
+            self._cleanup_completed_futures()
+
+    def _split_batch(self, batch: List[str]) -> Generator[List[str], None, None]:
+        """Split large batches into smaller chunks"""
+        for i in range(0, len(batch), self.batch_size):
+            yield batch[i:i + self.batch_size]
+
+    def _cleanup_completed_futures(self) -> None:
+        """Clean up completed futures and handle any errors"""
         done_futures = [f for f in self.pending_futures if f.done()]
         for future in done_futures:
             self.pending_futures.remove(future)
-            # Check for exceptions
             try:
                 future.result()
             except Exception as e:
                 logging.error(f"Batch processing error: {str(e)}")
-    
-    def _process_batch(self, texts: List[str]) -> None:
-        """Process individual batch with optimized operations"""
-        try:
-            # Perform batch operations here
-            # This is where you'd add specific processing logic
-            pass
-        except Exception as e:
-            logging.error(f"Error processing batch: {str(e)}")
-            raise
-    
+
     def wait_completion(self) -> None:
         """Wait for all pending operations to complete"""
-        for future in self.pending_futures:
-            try:
-                future.result()
-            except Exception as e:
-                logging.error(f"Error in pending batch: {str(e)}")
+        try:
+            if self.executor:
+                self.executor.shutdown(wait=True)
+                self.executor = None
+            self.pending_futures.clear()
+        except Exception as e:
+            logging.error(f"Error during completion: {str(e)}")
+        finally:
+            gc.collect()
+
+    def __del__(self):
+        """Ensure cleanup on deletion"""
+        self.wait_completion()
