@@ -1,13 +1,14 @@
 import os
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import yaml
 from datasets import load_dataset
 from tqdm import tqdm
 from typing import List, Dict, Any, Optional, Union, Iterable
 import logging
 from pathlib import Path
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from concurrent.futures import ThreadPoolExecutor
+import numpy as np
 
 class DatasetProcessor:
     def __init__(self, config_path: Union[str, Path]):
@@ -20,8 +21,14 @@ class DatasetProcessor:
         self.config_path = Path(config_path)
         if not self.config_path.exists():
             raise FileNotFoundError(f"Config file not found: {config_path}")
-            
+        
         self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+        logging.basicConfig(
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            handlers=[logging.StreamHandler()],
+        )
+
         self.datasets: List[str] = []
         self.config: Dict[str, Any] = self._load_config()
         self.datasets = self._load_and_preprocess_datasets()
@@ -32,8 +39,8 @@ class DatasetProcessor:
             with open(self.config_path, "r", encoding="utf-8") as file:
                 config = yaml.safe_load(file)
             
-            if not isinstance(config, dict) or 'datasets' not in config:
-                raise ValueError("Config must contain a 'datasets' key")
+            if not isinstance(config, dict) or "datasets" not in config:
+                raise ValueError("Config must contain a 'datasets' key.")
             return config
         except yaml.YAMLError as e:
             raise ValueError(f"Invalid YAML format in config file: {e}")
@@ -49,65 +56,67 @@ class DatasetProcessor:
             ValueError: If dataset configuration is invalid.
         """
         data: List[str] = []
-        
-        for dataset in tqdm(self.config['datasets'], desc="Loading datasets"):
-            if not isinstance(dataset, dict) or 'type' not in dataset:
+        for dataset in tqdm(self.config["datasets"], desc="Loading datasets"):
+            if not isinstance(dataset, dict) or "type" not in dataset:
                 raise ValueError(f"Invalid dataset configuration: {dataset}")
-                
+
             try:
-                if dataset['type'] == 'local':
+                if dataset["type"] == "local":
                     data.extend(self._process_local_dataset(dataset))
-                elif dataset['type'] == 'huggingface':
+                elif dataset["type"] == "huggingface":
                     data.extend(self._process_huggingface_dataset(dataset))
                 else:
                     self.logger.warning(f"Unknown dataset type: {dataset['type']}")
             except Exception as e:
                 self.logger.error(f"Error processing dataset {dataset.get('name', 'unknown')}: {e}")
-                if self.config.get('strict', False):
+                if self.config.get("strict", False):
                     raise
-
+        self.log_dataset_statistics(data)
         return data
 
     def _process_local_dataset(self, dataset: Dict[str, Any]) -> List[str]:
         """Process local dataset files."""
-        if 'path' not in dataset:
-            raise ValueError("Local dataset must specify 'path'")
-            
-        path = Path(dataset['path'])
+        if "path" not in dataset:
+            raise ValueError("Local dataset must specify 'path'.")
+        
+        path = Path(dataset["path"])
         if not path.exists():
             raise FileNotFoundError(f"Dataset path not found: {path}")
-            
-        patterns = dataset.get('patterns', ['*.txt'])
-        processed_data: List[str] = []
         
+        patterns = dataset.get("patterns", ["*.txt"])
+        processed_data: List[str] = []
+
+        def process_file(file: Path) -> List[str]:
+            try:
+                text = file.read_text(encoding="utf-8")
+                return self._preprocess_text(text.splitlines())
+            except Exception as e:
+                self.logger.error(f"Error processing file {file}: {e}")
+                return []
+
         for pattern in patterns:
             files = list(path.glob(pattern))
-            for file in tqdm(files, desc=f"Processing {pattern} files"):
-                try:
-                    text = file.read_text(encoding="utf-8")
-                    processed_data.extend(self._preprocess_text(text.splitlines()))
-                except Exception as e:
-                    self.logger.error(f"Error processing file {file}: {e}")
-                    if self.config.get('strict', False):
-                        raise
-                        
+            with ThreadPoolExecutor() as executor:
+                results = executor.map(process_file, files)
+                for result in results:
+                    processed_data.extend(result)
         return processed_data
 
     def _process_huggingface_dataset(self, dataset: Dict[str, Any]) -> List[str]:
         """Process Hugging Face dataset."""
-        if 'name' not in dataset:
-            raise ValueError("Hugging Face dataset must specify 'name'")
-            
+        if "name" not in dataset:
+            raise ValueError("Hugging Face dataset must specify 'name'.")
+        
         hf_data = load_dataset(
-            dataset['name'],
-            split=dataset.get('split', 'train'),
-            cache_dir=dataset.get('cache_dir', './cache')
+            dataset["name"],
+            split=dataset.get("split", "train"),
+            cache_dir=dataset.get("cache_dir", "./cache"),
         )
         
-        field = dataset.get('field', 'text')
+        field = dataset.get("field", "text")
         if field not in hf_data.features:
-            raise ValueError(f"Field '{field}' not found in dataset")
-            
+            raise ValueError(f"Field '{field}' not found in dataset.")
+        
         return self._preprocess_text(hf_data[field])
 
     def _preprocess_text(self, texts: Iterable[str]) -> List[str]:
@@ -124,9 +133,17 @@ class DatasetProcessor:
         for text in texts:
             if isinstance(text, str):
                 cleaned = text.strip()
-                if cleaned and len(cleaned) >= self.config.get('min_length', 1):
+                if self.config.get("lowercase", False):
+                    cleaned = cleaned.lower()
+                if cleaned and len(cleaned.split()) >= self.config.get("min_length", 1):
                     processed.append(cleaned)
         return processed
+
+    def log_dataset_statistics(self, data: List[str]):
+        """Log basic statistics of the processed dataset."""
+        total_samples = len(data)
+        avg_length = np.mean([len(text.split()) for text in data])
+        self.logger.info(f"Total Samples: {total_samples}, Avg. Length: {avg_length:.2f} words.")
 
     def save_processed_data(self, output_path: Union[str, Path]) -> None:
         """
@@ -167,13 +184,12 @@ class TextDataset(Dataset):
             max_length=self.max_length,
             padding="max_length",
             truncation=True,
-            return_tensors="pt"
+            return_tensors="pt",
         )
-        
         return {
             "input_ids": encoding.input_ids.squeeze(),
             "attention_mask": encoding.attention_mask.squeeze(),
-            "labels": encoding.input_ids.squeeze()  # For autoregressive tasks
+            "labels": encoding.input_ids.squeeze(),  # For autoregressive tasks
         }
 
     @staticmethod

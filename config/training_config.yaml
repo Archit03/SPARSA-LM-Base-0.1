@@ -9,8 +9,9 @@ training:
   seed: 42  # Random seed for reproducibility
   resume_from_checkpoint: null  # Path to a checkpoint to resume training (set null if starting fresh)
   checkpoint_dir: "checkpoints"  # Directory to save model checkpoints
-  scheduler_step_size: 1  # Step size for learning rate scheduler
-  scheduler_gamma: 0.9  # Gamma value for learning rate scheduler
+  scheduler_type: "cosine"  # Scheduler type: "linear", "cosine"
+  warmup_ratio: 0.1  # Ratio of warmup steps for learning rate scheduler
+  gradient_accumulation_steps: 2  # Number of steps for gradient accumulation
   log_every_n_steps: 10  # Log metrics every N steps
   eval_every_n_epochs: 1  # Evaluate the model every N epochs
 
@@ -41,7 +42,7 @@ model:
 logging:
   log_dir: "logs"  # Directory to save logs
   use_wandb: true  # Enable logging to Weights & Biases
-  wandb_project: "transformer-training"  # Name of the Weights & Biases project
+  wandb_project: "LuminaLM_Base_0.1"  # Name of the Weights & Biases project
   wandb_entity: null  # Set this to your W&B entity name if applicable
 
 # Memory Monitoring

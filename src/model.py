@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+import transformers
+from typing import Dict
 
 class TransformerConfig:
     """
@@ -24,7 +26,14 @@ class TransformerConfig:
         prenorm: bool = True,
         vocab_size: int = 32000,
         tie_embeddings: bool = False,
-        scheduler_type: str = "cosine"
+        scheduler_type: str = "cosine",
+        learning_rate: float = 1e-4,
+        weight_decay: float = 0.0,
+        warmup_ratio: float = 0.1,
+        use_mixed_precision: bool = True,
+        max_grad_norm: float = 0.0,
+        pad_token_id: int = 0,
+        l2_reg: float = 0.0
     ):
         # Input validation
         if d_model % num_heads != 0:
@@ -57,6 +66,13 @@ class TransformerConfig:
         self.vocab_size = vocab_size
         self.tie_embeddings = tie_embeddings
         self.scheduler_type = scheduler_type
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.warmup_ratio = warmup_ratio
+        self.use_mixed_precision = use_mixed_precision
+        self.max_grad_norm = max_grad_norm
+        self.pad_token_id = pad_token_id
+        self.l2_reg = l2_reg
 
     def __repr__(self) -> str:
         """
@@ -583,7 +599,7 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 ###############################################################################
-# Full Encoder–Decoder Transformer with Sparse Attention + Checkpointing + Cache
+# Full Encoder–Decoder Transformer with Advanced Training Features
 ###############################################################################
 class Transformer(nn.Module):
     def __init__(
@@ -615,6 +631,11 @@ class Transformer(nn.Module):
         self._reset_parameters()
         self.training_hooks = []
         self.frozen_params = set()
+
+        # Add training optimization features
+        self.scaler = torch.cuda.amp.GradScaler(enabled=config.use_mixed_precision)
+        self.metrics = {'train': {}, 'val': {}}
+        self.best_val_loss = float('inf')
 
     def _reset_parameters(self):
         """Custom parameter initialization"""
@@ -720,24 +741,134 @@ class Transformer(nn.Module):
             weights[f'decoder_cross_layer_{i}'] = layer.cross_attn.last_attn_weights
         return weights
 
+    def configure_optimizer(self, config: TransformerConfig):
+        """Configure optimizer with weight decay"""
+        # Separate weight decay and non-weight decay params
+        decay_params = []
+        no_decay_params = []
+        
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            # Don't apply weight decay to biases and layer norms
+            if 'bias' in name or 'norm' in name or 'embedding' in name:
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+                
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': config.weight_decay},
+            {'params': no_decay_params, 'weight_decay': 0.0}
+        ]
+        
+        optimizer = torch.optim.AdamW(
+            optim_groups,
+            lr=config.learning_rate,
+            betas=(0.9, 0.999),
+            eps=1e-8
+        )
+        
+        return optimizer
+
+    def training_step(self, batch, optimizer) -> Dict[str, float]:
+        """Single training step with mixed precision"""
+        self.train()
+        metrics = {}
+        
+        with torch.cuda.amp.autocast(enabled=self.config.use_mixed_precision):
+            # Forward pass
+            outputs = self(
+                src=batch['input_ids'],
+                tgt=batch['labels'],
+                src_mask=batch.get('attention_mask'),
+                tgt_mask=self._generate_square_subsequent_mask(batch['labels'].size(1))
+            )
+            
+            loss = self.compute_loss(outputs, batch['labels'])
+            metrics['loss'] = loss.item()
+            
+            # Add regularization if configured
+            if self.config.use_regularization:
+                reg_loss = self.compute_regularization()
+                loss += reg_loss
+                metrics['reg_loss'] = reg_loss.item()
+        
+        # Backward pass with gradient scaling
+        self.scaler.scale(loss).backward()
+        
+        # Gradient clipping
+        if self.config.max_grad_norm > 0:
+            self.scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(self.parameters(), self.config.max_grad_norm)
+        
+        self.scaler.step(optimizer)
+        self.scaler.update()
+        optimizer.zero_grad()
+        
+        return metrics
+
+    def validation_step(self, batch) -> Dict[str, float]:
+        """Validation step with metrics collection"""
+        self.eval()
+        metrics = {}
+        
+        with torch.no_grad():
+            outputs = self(
+                src=batch['input_ids'],
+                tgt=batch['labels'],
+                src_mask=batch.get('attention_mask'),
+                tgt_mask=self._generate_square_subsequent_mask(batch['labels'].size(1))
+            )
+            
+            metrics['loss'] = self.compute_loss(outputs, batch['labels']).item()
+            metrics.update(self.compute_metrics(outputs, batch['labels']))
+            
+        return metrics
+
+    def compute_regularization(self) -> torch.Tensor:
+        """Compute regularization loss"""
+        reg_loss = 0.0
+        
+        if self.config.l2_reg > 0:
+            for param in self.parameters():
+                reg_loss += torch.norm(param, p=2)
+            reg_loss *= self.config.l2_reg
+            
+        return reg_loss
+
+    def compute_metrics(self, outputs, labels) -> Dict[str, float]:
+        """Compute evaluation metrics"""
+        metrics = {}
+        predictions = outputs.argmax(dim=-1)
+        
+        # Accuracy
+        mask = labels != self.config.pad_token_id
+        correct = (predictions == labels) & mask
+        metrics['accuracy'] = correct.sum().float() / mask.sum()
+        
+        # Perplexity
+        metrics['perplexity'] = torch.exp(self.compute_loss(outputs, labels))
+        
+        return metrics
+
     @staticmethod
     def get_scheduler(optimizer, config: TransformerConfig, num_training_steps: int):
-        """
-        Creates learning rate scheduler based on config.
-        """
-        if config.scheduler_type == "cosine":
-            return torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, 
-                T_max=num_training_steps
-            )
-        elif config.scheduler_type == "polynomial":
-            return torch.optim.lr_scheduler.PolynomialLR(
+        """Enhanced learning rate scheduler with warmup"""
+        num_warmup_steps = int(num_training_steps * config.warmup_ratio)
+        
+        if config.scheduler_type == "cosine_warmup":
+            return transformers.get_cosine_schedule_with_warmup(
                 optimizer,
-                total_iters=num_training_steps,
-                power=1.0  # Linear decay
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps
             )
-        else:
-            return None
+        elif config.scheduler_type == "linear_warmup":
+            return transformers.get_linear_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps
+            )
+        # ... existing scheduler options ...
 
 ###############################################################################
 # Rotary Positional Embedding
@@ -764,7 +895,7 @@ class RotaryPositionalEmbedding(nn.Module):
 
 config = TransformerConfig(tie_embeddings=True, scheduler_type="cosine")
 model = Transformer(config, src_vocab_size=32000, tgt_vocab_size=32000)
-optimizer = torch.optim.Adam(model.parameters())
+optimizer = model.configure_optimizer(config)
 scheduler = model.get_scheduler(optimizer, config, num_training_steps=10000)
 
 # Add training hook for attention visualization
