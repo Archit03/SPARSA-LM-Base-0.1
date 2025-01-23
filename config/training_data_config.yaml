@@ -1,18 +1,21 @@
-- name: shakespeare
-  type: huggingface
-  config:
-    dataset_name: "Trelis/tiny-shakespeare"
-    cache_dir: "cache/shakespeare"
+datasets:
 
-- name: Abirate
-  type: huggingface
-  config:
-    dataset_name: "Abirate/english_quotes"
-    cache_dir: "cache/abirate"
+  # Local Train Dataset
+  - name: local_train
+    type: local
+    config:
+      path: "C:/Users/ASUS/Desktop/PreProcessed/processed/split/train"
+      patterns:
+        - "*.txt"
+        - "*.csv"
+      csv_text_column: "text"  # Specify the column to extract text if using CSV files
 
-- name: wikipedia
-  type: huggingface
-  config:
-    dataset_name: "wikitext-103"
-    cache_dir: "cache/wikipedia"
-
+  # Local Test Dataset
+  - name: local_test
+    type: local
+    config:
+      path: "C:/Users/ASUS/Desktop/PreProcessed/processed/split/test"
+      patterns:
+        - "*.txt"
+        - "*.csv"
+      csv_text_column: "text"  # Specify the column to extract text if using CSV files
