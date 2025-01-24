@@ -159,34 +159,34 @@ class SparseMultiHeadAttention(nn.Module):
         x_rope = torch.cat([-x[..., 1::2], x[..., ::2]], dim=-1)
         return x * cos + x_rope * sin
 
-    def _attn_function(
-        self, 
-        Q, K, V, 
-        local_mask: torch.Tensor, 
-        attn_mask: torch.Tensor = None
-    ):
-        """
-        Core attention function used by forward().
-        (batch_size, num_heads, seq_len, d_k)
-        """
-        # Compute scores
+    def _attn_function(self, 
+                       Q, 
+                       K, 
+                       V, 
+                       local_mask, 
+                       attn_mask):
+    # Debugging shapes
+        print(f"Q shape: {Q.shape}, K shape: {K.shape}, V shape: {V.shape}, attn_mask shape: {attn_mask.shape}")
+
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
-        # Add local-window mask
-        # local_mask: (seq_len, seq_len) => expand to (1,1,seq_len,seq_len)
-        scores = scores + local_mask.unsqueeze(0).unsqueeze(0).to(scores.device)
-
-        # Additional mask (e.g., causal or padding)
+    # Prepare attention mask
         if attn_mask is not None:
+            attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)  # Align dimensions for broadcasting
             scores = scores.masked_fill(attn_mask == 0, float('-inf'))
 
-        # Softmax + dropout
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
+        # Apply softmax to scores
+        attn_weights = torch.softmax(scores, dim=-1)
 
-        # Weighted sum over V
+    # Apply local mask if applicable
+        if local_mask is not None:
+             attn_weights = attn_weights * local_mask
+
+    # Compute the final attention output
         output = torch.matmul(attn_weights, V)
-        return output
+
+        return output, attn_weights
+
 
     def forward(
         self, 
@@ -672,7 +672,7 @@ class Transformer(nn.Module):
         self.train()
         metrics = {}
         
-        with torch.cuda.amp.autocast(enabled=self.config.use_mixed_precision):
+        with torch.amp.autocast(enabled=self.config.use_mixed_precision):
             # Forward pass
             outputs = self(
                 src=batch['input_ids'],

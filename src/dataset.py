@@ -1,14 +1,11 @@
 import os
 import torch
 from torch.utils.data import Dataset
-import yaml
-from datasets import load_dataset
 from tqdm import tqdm
-from typing import List, Dict, Any, Optional, Union, Iterable
+from typing import List, Dict, Any, Union, Iterable
 import logging
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-import numpy as np
 
 
 class DatasetProcessor:
@@ -48,18 +45,12 @@ class DatasetProcessor:
             A list of preprocessed text samples.
         """
         data: List[str] = []
-        dataset_type = dataset_type.capitalize()
 
         try:
-            if config["type"] == "local":
-                data = self._process_local_dataset(config)
-            elif config["type"] == "huggingface":
-                data = self._process_huggingface_dataset(config)
-            else:
-                raise ValueError(f"Unknown dataset type: {config['type']}")
-            self.logger.info(f"{dataset_type} dataset loaded with {len(data)} samples.")
+            data = self._process_local_dataset(config)
+            self.logger.info(f"{dataset_type.capitalize()} dataset loaded with {len(data)} samples.")
         except Exception as e:
-            self.logger.error(f"Error loading {dataset_type} dataset: {e}")
+            self.logger.error(f"Error loading {dataset_type.capitalize()} dataset: {e}")
             raise
         return data
 
@@ -101,28 +92,6 @@ class DatasetProcessor:
                     processed_data.extend(result)
         return processed_data
 
-    def _process_huggingface_dataset(self, config: Dict[str, Any]) -> List[str]:
-        """
-        Process Hugging Face dataset.
-
-        Args:
-            config: Configuration dictionary for the Hugging Face dataset.
-
-        Returns:
-            A list of preprocessed text samples.
-        """
-        hf_data = load_dataset(
-            config["name"],
-            split=config.get("split", "train"),
-            cache_dir=config.get("cache_dir", "./cache"),
-        )
-
-        field = config.get("field", "text")
-        if field not in hf_data.features:
-            raise ValueError(f"Field '{field}' not found in Hugging Face dataset.")
-
-        return self._preprocess_text(hf_data[field])
-
     def _preprocess_text(self, texts: Iterable[str]) -> List[str]:
         """
         Preprocess text based on the preprocessing configuration.
@@ -142,11 +111,11 @@ class DatasetProcessor:
                 if cleaned and len(cleaned.split()) >= self.preprocessing_config.get("min_length", 1):
                     processed.append(cleaned)
         return processed
-    
+
     def get_train_dataset(self, tokenizer: Any, max_length: int) -> Dataset:
         """
         Return a PyTorch Dataset for the training data.
-        
+
         Args:
             tokenizer: Tokenizer to tokenize the text data.
             max_length: Maximum sequence length for tokenization.
@@ -159,7 +128,7 @@ class DatasetProcessor:
     def get_val_dataset(self, tokenizer: Any, max_length: int) -> Dataset:
         """
         Return a PyTorch Dataset for the validation data.
-        
+
         Args:
             tokenizer: Tokenizer to tokenize the text data.
             max_length: Maximum sequence length for tokenization.
@@ -169,31 +138,9 @@ class DatasetProcessor:
         """
         return TextDataset(self.val_data, tokenizer, max_length)
 
-    def save_processed_data(self, data: List[str], output_path: Union[str, Path]) -> None:
-        """
-        Save preprocessed data to a file.
-
-        Args:
-            data: List of processed text samples.
-            output_path: Path to save the processed data.
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(data, output_path)
-        size_in_mb = output_path.stat().st_size / (1024 * 1024)
-        self.logger.info(f"Processed data saved at {output_path}. Size: {size_in_mb:.2f} MB, Samples: {len(data)}.")
-
 
 class TextDataset(Dataset):
     def __init__(self, data: List[str], tokenizer: Any, max_length: int):
-        """
-        Initialize the dataset with tokenized text.
-
-        Args:
-            data: List of preprocessed text samples.
-            tokenizer: Tokenizer for encoding text.
-            max_length: Maximum sequence length for tokenization.
-        """
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -202,15 +149,6 @@ class TextDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        Tokenize and return a single data sample.
-
-        Args:
-            idx: Index of the sample.
-
-        Returns:
-            A dictionary with tokenized input IDs, attention mask, and labels.
-        """
         text = self.data[idx]
         encoding = self.tokenizer(
             text,
@@ -220,9 +158,9 @@ class TextDataset(Dataset):
             return_tensors="pt",
         )
         return {
-            "input_ids": encoding.input_ids.squeeze(),
-            "attention_mask": encoding.attention_mask.squeeze(),
-            "labels": encoding.input_ids.squeeze(),
+            "input_ids": encoding.input_ids.squeeze(0),  # Ensure tensors are not batched
+            "attention_mask": encoding.attention_mask.squeeze(0),
+            "labels": encoding.input_ids.squeeze(0),  # For autoregressive tasks
         }
 
     @staticmethod

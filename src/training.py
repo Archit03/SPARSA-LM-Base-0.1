@@ -9,7 +9,7 @@ from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerFast, get_scheduler
 from typing import Dict, Any, Optional
-from dataset import DatasetProcessor
+from dataset import DatasetProcessor, TextDataset
 from model import Transformer, TransformerConfig
 from utils import setup_logging, save_checkpoint, load_checkpoint, set_seed, MemoryMonitor
 from torch.amp import GradScaler, autocast
@@ -61,6 +61,10 @@ class Trainer:
             tokenizer_path = self.config['tokenizer']['path']
             self.tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
 
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                self.logger.info(f"Added `pad_token`: {self.tokenizer.pad_token}")
+
             # Set max sequence length
             max_length = self.config['dataset']['max_seq_len']
 
@@ -83,14 +87,16 @@ class Trainer:
                 batch_size=self.config['training']['batch_size'],
                 shuffle=True,
                 num_workers=self.config['training'].get('num_workers', 4),
-                pin_memory=True
+                pin_memory=True,
+                collate_fn=TextDataset.collate_fn,  
             )
             self.val_loader = DataLoader(
                 self.val_dataset,
                 batch_size=self.config['training']['batch_size'],
                 shuffle=False,
                 num_workers=self.config['training'].get('num_workers', 4),
-                pin_memory=True
+                pin_memory=True,
+                collate_fn=TextDataset.collate_fn,
             )
 
             # Model configuration and initialization
@@ -182,17 +188,24 @@ class Trainer:
             betas=(0.9, 0.999),
             eps=1e-8
         )
-
+    
     def _validate_config(self, config: Dict):
         required_keys = ['logging', 'training', 'tokenizer', 'dataset', 'model']
         for key in required_keys:
-          if key not in config:
-            raise ConfigurationError(f"Missing required config key: {key}")
-          if not isinstance(config['training']['learning_rate'], (int, float)):
-            raise ConfigurationError("'learning_rate' must be a float.")
-          if not isinstance(config['training']['batch_size'], int) or config['training']['batch_size'] <= 0:
-            raise ConfigurationError("'batch_size' must be a positive integer.")
+           if key not in config:
+                raise ConfigurationError(f"Missing required config key: {key}")
 
+    # Convert learning_rate to float if it's a string
+        if isinstance(config['training']['learning_rate'], str):
+            try:
+                config['training']['learning_rate'] = float(config['training']['learning_rate'])
+            except ValueError:
+                raise ConfigurationError("'learning_rate' must be a valid float value.")
+
+        if not isinstance(config['training']['learning_rate'], (int, float)):
+            raise ConfigurationError("'learning_rate' must be a float.")
+        if not isinstance(config['training']['batch_size'], int) or config['training']['batch_size'] <= 0:
+            raise ConfigurationError("'batch_size' must be a positive integer.")
 
     def _calculate_perplexity(self, loss):
         """Calculate perplexity from loss."""
@@ -221,46 +234,47 @@ class Trainer:
         progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch + 1}")
 
         for step, batch in enumerate(progress_bar):
-            inputs, attention_mask, labels = batch
-            inputs, attention_mask, labels = (
-                inputs.to(self.config['training']['device']),
-                attention_mask.to(self.config['training']['device']),
-                labels.to(self.config['training']['device'])
-            )
+            inputs = batch["input_ids"].to(self.config['training']['device'])
+            attention_mask = batch["attention_mask"].to(self.config['training']['device'])
+            labels = batch["labels"].to(self.config['training']['device'])
 
-            with autocast(enabled=self.config['training'].get('use_mixed_precision', True)):
-                outputs = self.model(inputs, attention_mask=attention_mask)
-                loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
-                loss = loss / self.gradient_accumulation_steps
+            # Specify the device type for autocast
+            device_type = 'cuda' if self.config['training']['device'] == 'cuda' else 'cpu'
 
-            total_loss += loss.item()
-            progress_bar.set_postfix(loss=loss.item())
+        with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
+            outputs = self.model(inputs, attention_mask=attention_mask)
+            loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
+            loss = loss / self.gradient_accumulation_steps
 
-            # Backward pass
-            self.scaler.scale(loss).backward()
+        total_loss += loss.item()
+        progress_bar.set_postfix(loss=loss.item())
 
-            # Gradient accumulation step
-            if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
-                self.scaler.unscale_(self.optimizer)
-                clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
+        # Backward pass
+        self.scaler.scale(loss).backward()
 
-            # Log to W&B
-            if self.use_wandb:
-                self._log_gradients_and_activations()
-                wandb.log({
-                    "model": "LuminaLM",
-                    "train_loss": loss.item(),
-                    "lr": self.scheduler.get_last_lr()[0]
-                })
+        # Gradient accumulation step
+        if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+            self.scaler.unscale_(self.optimizer)
+            clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.scheduler.step()
+            self.optimizer.zero_grad()
+
+        # Log to W&B
+        if self.use_wandb:
+            self._log_gradients_and_activations()
+            wandb.log({
+                "model": "LuminaLM",
+                "train_loss": loss.item(),
+                "lr": self.scheduler.get_last_lr()[0]
+            })
 
         avg_loss = total_loss / len(self.train_loader)
         train_perplexity = self._calculate_perplexity(avg_loss)
         self.logger.info(f"LuminaLM Epoch {epoch + 1} Training Loss: {avg_loss:.4f}, Perplexity: {train_perplexity:.2f}")
         return avg_loss, train_perplexity
+
 
     @torch.no_grad()
     def validate(self, epoch: int):
@@ -357,6 +371,7 @@ def main():
         # Load training config
         with open(training_config_path, 'r') as f:
             training_config = yaml.safe_load(f)
+            print(f"Learning rate: {training_config['training']['learning_rate']}, Type: {type(training_config['training']['learning_rate'])}") # for debugging
 
         # Load data config
         with open(data_config_path, 'r') as f:
