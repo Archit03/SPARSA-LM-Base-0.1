@@ -3,19 +3,45 @@ import random
 import numpy as np
 import torch 
 import logging
+from pathlib import Path
 
-def setup_logging(log_dir="logs", log_file = "training.log"):
-    """Set up for training logs"""
+def setup_logging(log_dir: str, name: str = 'LuminaLM') -> logging.Logger:
+    """
+    Set up logging configuration.
+    
+    Args:
+        log_dir: Directory to store log files
+        name: Name of the logger (default: 'LuminaLM')
+    
+    Returns:
+        logging.Logger: Configured logger instance
+    """
+    # Create log directory if it doesn't exist
     os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, log_file)
-    logging.basicConfig(
-        filename=log_path,
-        filemode="a",
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%d-%b-%y %H:%M:%S",
-        level=logging.INFO,
+    
+    # Create logger with the specified name
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    
+    # Create handlers
+    console_handler = logging.StreamHandler()
+    file_handler = logging.FileHandler(os.path.join(log_dir, f'{name}.log'))
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
     )
-    logging.info("Logging started")
+    
+    # Set formatter for handlers
+    console_handler.setFormatter(formatter)
+    file_handler.setFormatter(formatter)
+    
+    # Add handlers to logger
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    
+    return logger
 
 def set_seed(seed):
     """ Set seed for reproducibility"""
@@ -65,4 +91,40 @@ def ensure_dir(directory):
     if not os.path.exists(directory):
         os.makedirs(directory)
         logging.info(f"Created directory {directory}")
+
+class MemoryMonitor:
+    """Monitor GPU memory usage during training."""
+    def __init__(self):
+        self.enabled = torch.cuda.is_available()
+        if self.enabled:
+            self.logger = logging.getLogger('LuminaLM_memory')
+    
+    def log_memory(self, step: int = None, prefix: str = ""):
+        """Log current GPU memory usage."""
+        if not self.enabled:
+            return
+        
+        try:
+            allocated = torch.cuda.memory_allocated() / (1024 * 1024)  # Convert to MB
+            reserved = torch.cuda.memory_reserved() / (1024 * 1024)    # Convert to MB
+            max_allocated = torch.cuda.max_memory_allocated() / (1024 * 1024)
+            
+            message = (
+                f"{prefix} Memory Usage - "
+                f"Allocated: {allocated:.2f}MB, "
+                f"Reserved: {reserved:.2f}MB, "
+                f"Peak: {max_allocated:.2f}MB"
+            )
+            if step is not None:
+                message = f"Step {step}: {message}"
+                
+            self.logger.info(message)
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to log memory usage: {str(e)}")
+    
+    def reset_peak_memory(self):
+        """Reset peak memory statistics."""
+        if self.enabled:
+            torch.cuda.reset_peak_memory_stats()
         

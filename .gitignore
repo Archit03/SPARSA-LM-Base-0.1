@@ -4,3 +4,6 @@ logs/text_cleaning_detailed.log
 logs
 scripts/.env
 .webui_secret_key
+model
+wandb
+__pycache__

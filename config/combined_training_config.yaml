@@ -1,0 +1,50 @@
+dataset:
+- config:
+    csv_text_column: text
+    path: C:/Users/ASUS/Desktop/PreProcessed/processed/split/train
+    patterns:
+    - '*.txt'
+    - '*.csv'
+  name: local_train
+  type: local
+- config:
+    csv_text_column: text
+    path: C:/Users/ASUS/Desktop/PreProcessed/processed/split/test
+    patterns:
+    - '*.txt'
+    - '*.csv'
+  name: local_test
+  type: local
+logging:
+  log_dir: logs
+  use_wandb: true
+  wandb_entity: null
+  wandb_project: LuminaLM_Base_0.1
+memory_monitor:
+  enabled: true
+model:
+  dropout: 0.1
+  ff_dim: 1024
+  hidden_dim: 256
+  max_seq_len: 512
+  num_heads: 4
+  num_layers: 8
+  use_checkpointing: false
+  vocab_size: 32000
+tokenizer:
+  path: C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer
+training:
+  batch_size: 16
+  checkpoint_dir: model
+  device: cuda
+  epochs: 5
+  eval_every_n_epochs: 1
+  gradient_accumulation_steps: 2
+  learning_rate: 3e-4
+  log_every_n_steps: 10
+  max_grad_norm: 1.0
+  resume_from_checkpoint: null
+  scheduler_type: cosine
+  seed: 42
+  warmup_ratio: 0.1
+  weight_decay: 0.01

@@ -10,18 +10,21 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
+
 class DatasetProcessor:
-    def __init__(self, config_path: Union[str, Path]):
+    def __init__(self, train_config: Dict[str, Any], val_config: Dict[str, Any], preprocessing_config: Dict[str, Any]):
         """
-        Load datasets from a YAML config file and preprocess them.
+        Initialize the dataset processor with training and validation configurations.
 
         Args:
-            config_path: Path to the YAML configuration file.
+            train_config: Configuration for training dataset.
+            val_config: Configuration for validation dataset.
+            preprocessing_config: Text preprocessing options.
         """
-        self.config_path = Path(config_path)
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-        
+        self.train_config = train_config
+        self.val_config = val_config
+        self.preprocessing_config = preprocessing_config
+
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
         logging.basicConfig(
@@ -29,67 +32,63 @@ class DatasetProcessor:
             handlers=[logging.StreamHandler()],
         )
 
-        self.datasets: List[str] = []
-        self.config: Dict[str, Any] = self._load_config()
-        self.datasets = self._load_and_preprocess_datasets()
+        # Load and preprocess datasets
+        self.train_data = self._load_and_preprocess_dataset(self.train_config, "train")
+        self.val_data = self._load_and_preprocess_dataset(self.val_config, "val")
 
-    def _load_config(self) -> Dict[str, Any]:
-        """Load and validate the YAML configuration file."""
-        try:
-            with open(self.config_path, "r", encoding="utf-8") as file:
-                config = yaml.safe_load(file)
-            
-            if not isinstance(config, dict) or "datasets" not in config:
-                raise ValueError("Config must contain a 'datasets' key.")
-            return config
-        except yaml.YAMLError as e:
-            raise ValueError(f"Invalid YAML format in config file: {e}")
-
-    def _load_and_preprocess_datasets(self) -> List[str]:
+    def _load_and_preprocess_dataset(self, config: Dict[str, Any], dataset_type: str) -> List[str]:
         """
-        Load datasets and preprocess text.
+        Load and preprocess a dataset based on its configuration.
+
+        Args:
+            config: Configuration dictionary for the dataset.
+            dataset_type: Type of dataset being loaded ('train' or 'val').
 
         Returns:
             A list of preprocessed text samples.
-        
-        Raises:
-            ValueError: If dataset configuration is invalid.
         """
         data: List[str] = []
-        for dataset in tqdm(self.config["datasets"], desc="Loading datasets"):
-            if not isinstance(dataset, dict) or "type" not in dataset:
-                raise ValueError(f"Invalid dataset configuration: {dataset}")
+        dataset_type = dataset_type.capitalize()
 
-            try:
-                if dataset["type"] == "local":
-                    data.extend(self._process_local_dataset(dataset))
-                elif dataset["type"] == "huggingface":
-                    data.extend(self._process_huggingface_dataset(dataset))
-                else:
-                    self.logger.warning(f"Unknown dataset type: {dataset['type']}")
-            except Exception as e:
-                self.logger.error(f"Error processing dataset {dataset.get('name', 'unknown')}: {e}")
-                if self.config.get("strict", False):
-                    raise
-        self.log_dataset_statistics(data)
+        try:
+            if config["type"] == "local":
+                data = self._process_local_dataset(config)
+            elif config["type"] == "huggingface":
+                data = self._process_huggingface_dataset(config)
+            else:
+                raise ValueError(f"Unknown dataset type: {config['type']}")
+            self.logger.info(f"{dataset_type} dataset loaded with {len(data)} samples.")
+        except Exception as e:
+            self.logger.error(f"Error loading {dataset_type} dataset: {e}")
+            raise
         return data
 
-    def _process_local_dataset(self, dataset: Dict[str, Any]) -> List[str]:
-        """Process local dataset files."""
-        if "path" not in dataset:
-            raise ValueError("Local dataset must specify 'path'.")
-        
-        path = Path(dataset["path"])
+    def _process_local_dataset(self, config: Dict[str, Any]) -> List[str]:
+        """
+        Process local dataset files.
+
+        Args:
+            config: Configuration dictionary for the local dataset.
+
+        Returns:
+            A list of preprocessed text samples.
+        """
+        path = Path(config["config"]["path"])
         if not path.exists():
-            raise FileNotFoundError(f"Dataset path not found: {path}")
-        
-        patterns = dataset.get("patterns", ["*.txt"])
+            raise FileNotFoundError(f"Local dataset path not found: {path}")
+
+        patterns = config["config"].get("patterns", ["*.txt"])
         processed_data: List[str] = []
 
         def process_file(file: Path) -> List[str]:
             try:
-                text = file.read_text(encoding="utf-8")
-                return self._preprocess_text(text.splitlines())
+                if file.suffix == ".csv":
+                    import pandas as pd
+                    df = pd.read_csv(file)
+                    return df[config["config"]["csv_text_column"]].dropna().tolist()
+                else:
+                    text = file.read_text(encoding="utf-8")
+                    return self._preprocess_text(text.splitlines())
             except Exception as e:
                 self.logger.error(f"Error processing file {file}: {e}")
                 return []
@@ -102,26 +101,31 @@ class DatasetProcessor:
                     processed_data.extend(result)
         return processed_data
 
-    def _process_huggingface_dataset(self, dataset: Dict[str, Any]) -> List[str]:
-        """Process Hugging Face dataset."""
-        if "name" not in dataset:
-            raise ValueError("Hugging Face dataset must specify 'name'.")
-        
+    def _process_huggingface_dataset(self, config: Dict[str, Any]) -> List[str]:
+        """
+        Process Hugging Face dataset.
+
+        Args:
+            config: Configuration dictionary for the Hugging Face dataset.
+
+        Returns:
+            A list of preprocessed text samples.
+        """
         hf_data = load_dataset(
-            dataset["name"],
-            split=dataset.get("split", "train"),
-            cache_dir=dataset.get("cache_dir", "./cache"),
+            config["name"],
+            split=config.get("split", "train"),
+            cache_dir=config.get("cache_dir", "./cache"),
         )
-        
-        field = dataset.get("field", "text")
+
+        field = config.get("field", "text")
         if field not in hf_data.features:
-            raise ValueError(f"Field '{field}' not found in dataset.")
-        
+            raise ValueError(f"Field '{field}' not found in Hugging Face dataset.")
+
         return self._preprocess_text(hf_data[field])
 
     def _preprocess_text(self, texts: Iterable[str]) -> List[str]:
         """
-        Preprocess text data by stripping whitespace and filtering empty lines.
+        Preprocess text based on the preprocessing configuration.
 
         Args:
             texts: Iterable of raw text samples.
@@ -133,32 +137,52 @@ class DatasetProcessor:
         for text in texts:
             if isinstance(text, str):
                 cleaned = text.strip()
-                if self.config.get("lowercase", False):
+                if self.preprocessing_config.get("lowercase", False):
                     cleaned = cleaned.lower()
-                if cleaned and len(cleaned.split()) >= self.config.get("min_length", 1):
+                if cleaned and len(cleaned.split()) >= self.preprocessing_config.get("min_length", 1):
                     processed.append(cleaned)
         return processed
-
-    def log_dataset_statistics(self, data: List[str]):
-        """Log basic statistics of the processed dataset."""
-        total_samples = len(data)
-        avg_length = np.mean([len(text.split()) for text in data])
-        self.logger.info(f"Total Samples: {total_samples}, Avg. Length: {avg_length:.2f} words.")
-
-    def save_processed_data(self, output_path: Union[str, Path]) -> None:
+    
+    def get_train_dataset(self, tokenizer: Any, max_length: int) -> Dataset:
         """
-        Save preprocessed data to a file and log its size.
+        Return a PyTorch Dataset for the training data.
+        
+        Args:
+            tokenizer: Tokenizer to tokenize the text data.
+            max_length: Maximum sequence length for tokenization.
+
+        Returns:
+            A PyTorch Dataset instance for training.
+        """
+        return TextDataset(self.train_data, tokenizer, max_length)
+
+    def get_val_dataset(self, tokenizer: Any, max_length: int) -> Dataset:
+        """
+        Return a PyTorch Dataset for the validation data.
+        
+        Args:
+            tokenizer: Tokenizer to tokenize the text data.
+            max_length: Maximum sequence length for tokenization.
+
+        Returns:
+            A PyTorch Dataset instance for validation.
+        """
+        return TextDataset(self.val_data, tokenizer, max_length)
+
+    def save_processed_data(self, data: List[str], output_path: Union[str, Path]) -> None:
+        """
+        Save preprocessed data to a file.
 
         Args:
+            data: List of processed text samples.
             output_path: Path to save the processed data.
         """
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Save dataset
-        torch.save(self.datasets, output_path)
-        size_in_mb = output_path.stat().st_size / (1024 * 1024)  # Convert to MB
-        self.logger.info(f"Processed dataset saved at {output_path}. Size: {size_in_mb:.2f} MB, Samples: {len(self.datasets)}.")
+        torch.save(data, output_path)
+        size_in_mb = output_path.stat().st_size / (1024 * 1024)
+        self.logger.info(f"Processed data saved at {output_path}. Size: {size_in_mb:.2f} MB, Samples: {len(data)}.")
+
 
 class TextDataset(Dataset):
     def __init__(self, data: List[str], tokenizer: Any, max_length: int):
@@ -178,6 +202,15 @@ class TextDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Tokenize and return a single data sample.
+
+        Args:
+            idx: Index of the sample.
+
+        Returns:
+            A dictionary with tokenized input IDs, attention mask, and labels.
+        """
         text = self.data[idx]
         encoding = self.tokenizer(
             text,
@@ -189,7 +222,7 @@ class TextDataset(Dataset):
         return {
             "input_ids": encoding.input_ids.squeeze(),
             "attention_mask": encoding.attention_mask.squeeze(),
-            "labels": encoding.input_ids.squeeze(),  # For autoregressive tasks
+            "labels": encoding.input_ids.squeeze(),
         }
 
     @staticmethod

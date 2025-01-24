@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import transformers
-from typing import Dict
+from typing import Dict, Optional
 
 class TransformerConfig:
     """
@@ -33,7 +33,8 @@ class TransformerConfig:
         use_mixed_precision: bool = True,
         max_grad_norm: float = 0.0,
         pad_token_id: int = 0,
-        l2_reg: float = 0.0
+        l2_reg: float = 0.0,
+        use_checkpointing: bool = False
     ):
         # Input validation
         if d_model % num_heads != 0:
@@ -73,6 +74,7 @@ class TransformerConfig:
         self.max_grad_norm = max_grad_norm
         self.pad_token_id = pad_token_id
         self.l2_reg = l2_reg
+        self.use_checkpointing = use_checkpointing
 
     def __repr__(self) -> str:
         """
@@ -130,7 +132,7 @@ class SparseMultiHeadAttention(nn.Module):
     def __init__(
         self, 
         config: TransformerConfig,
-        is_causal=False
+        is_causal: bool = False
     ):
         super().__init__()
         self.config = config
@@ -313,27 +315,22 @@ class FeedForward(nn.Module):
 class EncoderBlock(nn.Module):
     def __init__(
         self, 
-        d_model, 
-        num_heads, 
-        window_size, 
-        global_tokens=0, 
-        d_ff=2048, 
-        dropout=0.1, 
-        use_checkpointing=False
+        config: TransformerConfig
     ):
         super().__init__()
-        self.self_attn_res = ResidualConnection(d_model, dropout, use_checkpointing)
-        self.ff_res = ResidualConnection(d_model, dropout, use_checkpointing)
-
-        self.self_attn = SparseMultiHeadAttention(
-            d_model=d_model,
-            num_heads=num_heads,
-            window_size=window_size,
-            global_tokens=global_tokens,
-            dropout=dropout,
-            use_checkpointing=use_checkpointing
+        self.self_attn_res = ResidualConnection(
+            config.d_model, 
+            config.dropout, 
+            config.use_checkpointing
         )
-        self.feed_forward = FeedForward(d_model, d_ff, dropout)
+        self.ff_res = ResidualConnection(
+            config.d_model, 
+            config.dropout, 
+            config.use_checkpointing
+        )
+
+        self.self_attn = SparseMultiHeadAttention(config)
+        self.feed_forward = FeedForward(config)
 
     def forward(self, x, src_mask=None, past_key_value=None, use_cache=False):
         """
@@ -464,31 +461,13 @@ class DecoderBlock(nn.Module):
 # Full Encoder
 ###############################################################################
 class Encoder(nn.Module):
-    def __init__(
-        self, 
-        d_model, 
-        num_heads, 
-        window_size, 
-        global_tokens, 
-        d_ff, 
-        num_layers, 
-        dropout=0.1, 
-        use_checkpointing=False
-    ):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
         self.layers = nn.ModuleList([
-            EncoderBlock(
-                d_model=d_model, 
-                num_heads=num_heads, 
-                window_size=window_size, 
-                global_tokens=global_tokens, 
-                d_ff=d_ff, 
-                dropout=dropout,
-                use_checkpointing=use_checkpointing
-            )
-            for _ in range(num_layers)
+            EncoderBlock(config)
+            for _ in range(config.num_layers)
         ])
-        self.norm = nn.LayerNorm(d_model)
+        self.norm = nn.LayerNorm(config.d_model)
 
     def forward(self, x, src_mask=None, past_key_values=None, use_cache=False):
         """
@@ -604,142 +583,60 @@ class PositionalEncoding(nn.Module):
 class Transformer(nn.Module):
     def __init__(
         self,
-        config: TransformerConfig,
-        src_vocab_size: int,
-        tgt_vocab_size: int
+        config: TransformerConfig
     ):
         super().__init__()
         self.config = config
         
-        # Embeddings with optional tying
-        self.src_embedding = nn.Embedding(src_vocab_size, config.d_model)
-        if config.tie_embeddings and src_vocab_size == tgt_vocab_size:
-            self.tgt_embedding = self.src_embedding
-        else:
-            self.tgt_embedding = nn.Embedding(tgt_vocab_size, config.d_model)
+        # Embeddings
+        self.embedding = nn.Embedding(config.vocab_size, config.d_model)
         
         # Positional encoding fallback
         if not config.use_rope:
-            self.src_pos = PositionalEncoding(config.d_model, config.max_seq_len, config.dropout)
-            self.tgt_pos = PositionalEncoding(config.d_model, config.max_seq_len, config.dropout)
+            self.pos_encoding = PositionalEncoding(
+                config.d_model, 
+                config.max_seq_len, 
+                config.dropout
+            )
         
-        # Create encoder/decoder with updated config
+        # Create encoder
         self.encoder = Encoder(config)
-        self.decoder = Decoder(config)
         
-        self.generator = nn.Linear(config.d_model, tgt_vocab_size)
+        # Output projection
+        self.generator = nn.Linear(config.d_model, config.vocab_size)
+        
         self._reset_parameters()
-        self.training_hooks = []
-        self.frozen_params = set()
-
-        # Add training optimization features
-        self.scaler = torch.cuda.amp.GradScaler(enabled=config.use_mixed_precision)
+        
+        # Training features
+        self.scaler = torch.amp.GradScaler(device ='cuda', enabled=config.use_mixed_precision)
         self.metrics = {'train': {}, 'val': {}}
         self.best_val_loss = float('inf')
 
     def _reset_parameters(self):
-        """Custom parameter initialization"""
+        """Initialize parameters."""
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
-        
-        # Special initialization for embedding layers
-        nn.init.normal_(self.src_embedding.weight, mean=0, std=0.02)
-        if not self.config.tie_embeddings:
-            nn.init.normal_(self.tgt_embedding.weight, mean=0, std=0.02)
-
-    def add_training_hook(self, hook):
-        """Add a hook function called during forward pass"""
-        self.training_hooks.append(hook)
-
-    def freeze_layers(self, layer_names):
-        """Freeze specified layers for fine-tuning"""
-        for name, param in self.named_parameters():
-            if any(layer_name in name for layer_name in layer_names):
-                param.requires_grad = False
-                self.frozen_params.add(name)
-
-    def unfreeze_layers(self, layer_names=None):
-        """Unfreeze layers (all if layer_names is None)"""
-        for name, param in self.named_parameters():
-            if layer_names is None or any(layer_name in name for layer_name in layer_names):
-                param.requires_grad = True
-                self.frozen_params.discard(name)
-
-    def encode(self, src, src_mask=None, past_key_values=None, use_cache=False):
-        # (batch_size, src_seq_len) => embed => position => encoder
-        x = self.src_embedding(src) * math.sqrt(self.d_model)
-        x = self.src_pos(x)
-        out, next_keys = self.encoder(x, src_mask, past_key_values, use_cache)
-        return out, next_keys
-
-    def decode(
-        self, 
-        tgt, 
-        memory, 
-        tgt_mask=None, 
-        src_mask=None, 
-        past_key_values=None, 
-        use_cache=False
-    ):
-        # (batch_size, tgt_seq_len)
-        x = self.tgt_embedding(tgt) * math.sqrt(self.d_model)
-        x = self.tgt_pos(x)
-        out, next_keys = self.decoder(x, memory, tgt_mask, src_mask, past_key_values, use_cache)
-        return out, next_keys
 
     def forward(
-        self, 
-        src, 
-        tgt, 
-        src_mask=None, 
-        tgt_mask=None, 
-        past_key_values_enc=None,
-        past_key_values_dec=None,
-        use_cache=False
+        self,
+        src: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[tuple] = None,
+        use_cache: bool = False
     ):
-        """
-        src, tgt: (batch_size, seq_len)
-        src_mask, tgt_mask: optional attention masks
-        past_key_values_enc/dec: lists of key-value pairs for caching
-        use_cache: bool -> whether to return new key-values
-        """
-        # 1) Encode
-        memory, enc_next = self.encode(
-            src, 
-            src_mask=src_mask, 
-            past_key_values=past_key_values_enc, 
-            use_cache=use_cache
-        )
-        # 2) Decode
-        hidden, dec_next = self.decode(
-            tgt, 
-            memory,
-            tgt_mask=tgt_mask, 
-            src_mask=src_mask,
-            past_key_values=past_key_values_dec,
-            use_cache=use_cache
-        )
-        # 3) Project to vocab
-        logits = self.generator(hidden)
-
-        # Call training hooks if any
-        if self.training and self.training_hooks:
-            attention_weights = self._get_attention_weights()
-            for hook in self.training_hooks:
-                hook(self, attention_weights)
-                
-        return logits, enc_next, dec_next
-
-    def _get_attention_weights(self):
-        """Collect attention weights for visualization"""
-        weights = {}
-        for i, layer in enumerate(self.encoder.layers):
-            weights[f'encoder_layer_{i}'] = layer.self_attn.last_attn_weights
-        for i, layer in enumerate(self.decoder.layers):
-            weights[f'decoder_self_layer_{i}'] = layer.self_attn.last_attn_weights
-            weights[f'decoder_cross_layer_{i}'] = layer.cross_attn.last_attn_weights
-        return weights
+        # Embedding + positional encoding
+        x = self.embedding(src)
+        if not self.config.use_rope:
+            x = self.pos_encoding(x)
+            
+        # Encoder
+        encoder_output = self.encoder(x, attention_mask)
+        
+        # Generate output
+        output = self.generator(encoder_output)
+        
+        return output
 
     def configure_optimizer(self, config: TransformerConfig):
         """Configure optimizer with weight decay"""
@@ -868,7 +765,6 @@ class Transformer(nn.Module):
                 num_warmup_steps=num_warmup_steps,
                 num_training_steps=num_training_steps
             )
-        # ... existing scheduler options ...
 
 ###############################################################################
 # Rotary Positional Embedding
@@ -892,21 +788,3 @@ class RotaryPositionalEmbedding(nn.Module):
             self.cos_cached = emb.cos()[None, None, :, :]
             self.sin_cached = emb.sin()[None, None, :, :]
         return self.cos_cached[:, :, :seq_len, :], self.sin_cached[:, :, :seq_len, :]
-
-config = TransformerConfig(tie_embeddings=True, scheduler_type="cosine")
-model = Transformer(config, src_vocab_size=32000, tgt_vocab_size=32000)
-optimizer = model.configure_optimizer(config)
-scheduler = model.get_scheduler(optimizer, config, num_training_steps=10000)
-
-# Add training hook for attention visualization
-def attention_viz_hook(model, attn_weights):
-    # Log or visualize attention weights
-    pass
-
-model.add_training_hook(attention_viz_hook)
-
-# Freeze embeddings for fine-tuning
-model.freeze_layers(['embedding', 'encoder.0', 'encoder.1'])
-
-# Later, unfreeze specific layers
-model.unfreeze_layers(['encoder.1'])
