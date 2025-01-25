@@ -6,21 +6,30 @@ from typing import List, Dict, Any, Union, Iterable
 import logging
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from sklearn.model_selection import train_test_split
 
 
 class DatasetProcessor:
-    def __init__(self, train_config: Dict[str, Any], val_config: Dict[str, Any], preprocessing_config: Dict[str, Any]):
-        """
-        Initialize the dataset processor with training and validation configurations.
-
-        Args:
-            train_config: Configuration for training dataset.
-            val_config: Configuration for validation dataset.
-            preprocessing_config: Text preprocessing options.
-        """
-        self.train_config = train_config
-        self.val_config = val_config
+    def __init__(self, source_dir: str, split: Dict[str, Any], preprocessing_config: Dict[str, Any]):
+        if not os.path.exists(source_dir):
+            raise ValueError(f"Source directory does not exist: {source_dir}")
+        self.source_dir = source_dir
+        self.split = split
         self.preprocessing_config = preprocessing_config
+        self.train_data = []
+        self.val_data = []
+        self._load_and_split_data()
+
+    def _load_and_split_data(self):
+    # Load and preprocess files from source_dir
+        source_data = self._load_and_preprocess_source()
+        test_size = self.split.get('test_size', 0.2)
+        random_state = self.split.get('random_state', 42)
+    
+        # Perform train-test split
+        self.train_data, self.val_data = train_test_split(
+        source_data, test_size=test_size, random_state=random_state
+    )
 
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
@@ -29,68 +38,27 @@ class DatasetProcessor:
             handlers=[logging.StreamHandler()],
         )
 
-        # Load and preprocess datasets
-        self.train_data = self._load_and_preprocess_dataset(self.train_config, "train")
-        self.val_data = self._load_and_preprocess_dataset(self.val_config, "val")
+        # Load and preprocess data
+        self.data = self._load_and_preprocess_source()
+        self.train_data, self.val_data = train_test_split(
+            self.data, test_size=self.test_size, random_state=self.random_state
+        )
+        self.logger.info(f"Train dataset size: {len(self.train_data)}")
+        self.logger.info(f"Validation dataset size: {len(self.val_data)}")
 
-    def _load_and_preprocess_dataset(self, config: Dict[str, Any], dataset_type: str) -> List[str]:
-        """
-        Load and preprocess a dataset based on its configuration.
-
-        Args:
-            config: Configuration dictionary for the dataset.
-            dataset_type: Type of dataset being loaded ('train' or 'val').
-
-        Returns:
-            A list of preprocessed text samples.
-        """
-        data: List[str] = []
-
-        try:
-            data = self._process_local_dataset(config)
-            self.logger.info(f"{dataset_type.capitalize()} dataset loaded with {len(data)} samples.")
-        except Exception as e:
-            self.logger.error(f"Error loading {dataset_type.capitalize()} dataset: {e}")
-            raise
-        return data
-
-    def _process_local_dataset(self, config: Dict[str, Any]) -> List[str]:
-        """
-        Process local dataset files.
-
-        Args:
-            config: Configuration dictionary for the local dataset.
-
-        Returns:
-            A list of preprocessed text samples.
-        """
-        path = Path(config["config"]["path"])
-        if not path.exists():
-            raise FileNotFoundError(f"Local dataset path not found: {path}")
-
-        patterns = config["config"].get("patterns", ["*.txt"])
-        processed_data: List[str] = []
-
-        def process_file(file: Path) -> List[str]:
-            try:
-                if file.suffix == ".csv":
-                    import pandas as pd
-                    df = pd.read_csv(file)
-                    return df[config["config"]["csv_text_column"]].dropna().tolist()
-                else:
-                    text = file.read_text(encoding="utf-8")
-                    return self._preprocess_text(text.splitlines())
-            except Exception as e:
-                self.logger.error(f"Error processing file {file}: {e}")
-                return []
-
+    def _load_and_preprocess_source(self):
+        data = []
+        patterns = self.preprocessing_config.get("patterns", ["*.txt", "*.csv"])
         for pattern in patterns:
-            files = list(path.glob(pattern))
-            with ThreadPoolExecutor() as executor:
-                results = executor.map(process_file, files)
-                for result in results:
-                    processed_data.extend(result)
-        return processed_data
+            for file_path in Path(self.source_dir).glob(pattern):
+                if file_path.suffix == ".csv":
+                  import pandas as pd
+                  df = pd.read_csv(file_path)
+                  data.extend(df[self.preprocessing_config["csv_text_column"]].dropna().tolist())
+                else:
+                  with open(file_path, "r", encoding="utf-8") as f:
+                      data.extend(f.readlines())
+        return self._preprocess_text(data)
 
     def _preprocess_text(self, texts: Iterable[str]) -> List[str]:
         """
@@ -113,29 +81,11 @@ class DatasetProcessor:
         return processed
 
     def get_train_dataset(self, tokenizer: Any, max_length: int) -> Dataset:
-        """
-        Return a PyTorch Dataset for the training data.
-
-        Args:
-            tokenizer: Tokenizer to tokenize the text data.
-            max_length: Maximum sequence length for tokenization.
-
-        Returns:
-            A PyTorch Dataset instance for training.
-        """
+        """Return a PyTorch Dataset for the training data."""
         return TextDataset(self.train_data, tokenizer, max_length)
 
     def get_val_dataset(self, tokenizer: Any, max_length: int) -> Dataset:
-        """
-        Return a PyTorch Dataset for the validation data.
-
-        Args:
-            tokenizer: Tokenizer to tokenize the text data.
-            max_length: Maximum sequence length for tokenization.
-
-        Returns:
-            A PyTorch Dataset instance for validation.
-        """
+        """Return a PyTorch Dataset for the validation data."""
         return TextDataset(self.val_data, tokenizer, max_length)
 
 

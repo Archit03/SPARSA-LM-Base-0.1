@@ -1,4 +1,3 @@
-# Training Configuration
 training:
   device: "cuda"  # Use "cuda" for GPU or "cpu" for CPU
   epochs: 5  # Number of training epochs
@@ -9,30 +8,36 @@ training:
   seed: 42  # Random seed for reproducibility
   resume_from_checkpoint: null  # Path to a checkpoint to resume training (set null if starting fresh)
   checkpoint_dir: "checkpoints"  # Directory to save model checkpoints
-  scheduler_type: "cosine"  # Scheduler type: "linear", "cosine", "cosine_with_restarts"
+  checkpoint_save_frequency: 1  # Save checkpoints every N epochs
+  scheduler_type: "cosine_with_restarts"  # Scheduler type: "linear", "cosine", "cosine_with_restarts"
+  scheduler_params:  # Advanced scheduler parameters
+    T_0: 10
+    T_mult: 2
+    eta_min: 1e-6
   warmup_ratio: 0.1  # Ratio of warmup steps for learning rate scheduler
   gradient_accumulation_steps: 2  # Number of steps for gradient accumulation
   log_every_n_steps: 10  # Log metrics every N steps
   eval_every_n_epochs: 1  # Evaluate the model every N epochs
   early_stopping_patience: 3  # Number of epochs to wait for validation loss improvement before early stopping
   use_mixed_precision: true  # Enable mixed-precision training for improved GPU performance
+  amp_scaler_init_scale: 65536  # Initial scale for GradScaler (useful for fine control)
 
-# Dataset Configuration
 dataset:
-  train_dataset: "local_train"  # Reference to the dataset name in datasets.yaml
-  val_dataset: "local_test"  # Reference to the dataset name in datasets.yaml
+  train_dataset: "local_data"  # Reference to the dataset name in datasets.yaml
   max_seq_len: 512  # Maximum sequence length for tokenization
   num_workers: 4  # Number of workers for data loading
   shuffle: true  # Shuffle the training data
-  preprocessing:  # Preprocessing configuration for datasets
+  preprocessing:
     lowercase: true  # Convert all text to lowercase
     min_length: 5  # Minimum number of tokens required for a text sample to be valid
+  split:
+    test_size: 0.2  # Proportion of validation data
+    random_state: 42  # Seed for reproducibility
 
-# Tokenizer Configuration
 tokenizer:
-  path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer"  # Path to tokenizer
+  path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer"  # Path to tokenizer or Hugging Face model ID
+  add_special_tokens: true  # Ensure special tokens are added if missing
 
-# Model Configuration
 model:
   num_layers: 8  # Number of transformer layers
   num_heads: 4  # Number of attention heads
@@ -45,15 +50,17 @@ model:
   activation: "gelu"  # Activation function: "relu", "gelu", "silu"
   tie_embeddings: false  # Share embeddings between input and output tokens
 
-# Logging Configuration
 logging:
   log_dir: "logs"  # Directory to save logs
   use_wandb: true  # Enable logging to Weights & Biases
   wandb_project: "LuminaLM_Base_0.1"  # Name of the Weights & Biases project
   wandb_entity: null  # Set this to your W&B entity name if applicable
   log_gradients: true  # Log gradient norms to W&B
+  log_model_weights: true  # Log model weights
+  log_train_steps: true  # Log training steps
 
-# Memory Monitoring
 memory_monitor:
   enabled: true  # Enable memory usage logging
   log_frequency: 10  # Log memory usage every N steps
+  monitor_gpu: true  # Include GPU memory stats
+  monitor_cpu: true  # Include CPU memory stats

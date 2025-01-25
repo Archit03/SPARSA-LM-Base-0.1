@@ -1,21 +1,9 @@
 datasets:
-
-  # Local Train Dataset
-  - name: local_train
+  - name: local_data
     type: local
     config:
-      path: "C:/Users/ASUS/Desktop/PreProcessed/processed/split/train"
+      source_dir: "C:/Users/ASUS/Desktop/PreProcessed/processed/cleaned"  # Ensure this directory exists
       patterns:
         - "*.txt"
         - "*.csv"
-      csv_text_column: "text"  # Specify the column to extract text if using CSV files
-
-  # Local Test Dataset
-  - name: local_test
-    type: local
-    config:
-      path: "C:/Users/ASUS/Desktop/PreProcessed/processed/split/test"
-      patterns:
-        - "*.txt"
-        - "*.csv"
-      csv_text_column: "text"  # Specify the column to extract text if using CSV files
+      csv_text_column: "text"  # Column name for CSV files
