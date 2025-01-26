@@ -22,168 +22,142 @@ class ConfigurationError(Exception):
     pass
 
 class Trainer:
-
-  def __init__(self, training_config: Dict, data_config: Dict):
-    try:
-        # Assign configurations
-        self.config = training_config
-        self.data_config = data_config
-
-        # Extract preprocessing config
-        preprocessing_config = self.config['dataset'].get('preprocessing', {})
-
-        # Setup logging
-        self.logger = setup_logging(self.config['logging']['log_dir'], name='LuminaLM_trainer')
-
-        # Initialize W&B
-        if self.config['logging'].get('use_wandb', True):
-            wandb.init(
-                project=self.config['logging'].get('wandb_project', 'LuminaLM-training'),
-                config=self.config
-            )
-            self.use_wandb = True
-        else:
-            self.use_wandb = False
-
-        # Set random seeds for reproducibility
-        set_seed(self.config['training']['seed'])
-
-        # Load tokenizer
-        tokenizer_path = self.config['tokenizer']['path']
-        self.tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
-
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-            self.logger.info(f"Added `pad_token`: {self.tokenizer.pad_token}")
-
-        # Initialize DatasetProcessor
+    def __init__(self, training_config: Dict, data_config: Dict):
         try:
+            # Assign configurations
+            self.config = training_config
+            self.data_config = data_config
+
+            # Setup logging
+            self.logger = setup_logging(self.config['logging']['log_dir'], name='LuminaLM_trainer')
+
+            # Initialize Weights & Biases (W&B)
+            if self.config['logging'].get('use_wandb', True):
+                wandb.init(
+                    project=self.config['logging'].get('wandb_project', 'LuminaLM-training'),
+                    config=self.config
+                )
+                self.use_wandb = True
+            else:
+                self.use_wandb = False
+
+            # Set random seeds for reproducibility
+            set_seed(self.config['training']['seed'])
+
+            # Load tokenizer
+            tokenizer_path = self.config['tokenizer']['path']
+            self.tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                self.logger.info(f"Added `pad_token`: {self.tokenizer.pad_token}")
+
+            # Load dataset configuration and initialize DatasetProcessor
+            datasets = self.data_config.get('datasets', [])
+            if not isinstance(datasets, list):
+                raise ConfigurationError("'datasets' must be a list of dataset configurations.")
             source_dir = next(
-          (d['config']['source_dir'] for d in self.data_config if d['name'] == self.config['dataset']['train_dataset']),
-          None)
+                (d.get('config', {}).get('source_dir') for d in datasets if d.get('name') == self.config['dataset']['train_dataset']),
+                None
+            )
             if not source_dir or not os.path.exists(source_dir):
-                raise ConfigurationError(f"'source_dir' is missing, invalid, or the directory does not exist in the dataset configuration.")
-        except KeyError as e:
-            raise ConfigurationError(f"Missing required key in dataset configuration: {e}")
-        except Exception as e:
-            raise RuntimeError(f"An error occurred during dataset initialization: {e}")
+                raise ConfigurationError(f"Invalid source directory: {source_dir}")
 
-
-        split_config = self.config['dataset'].get('split', {'test_size': 0.2, 'random_state': 42})
-        preprocessing_config = self.config['dataset'].get('preprocessing', {})
-
-        self.dataset_processor = DatasetProcessor(
-        source_dir=source_dir,
-        split=split_config,
-        preprocessing_config=preprocessing_config
-        )
-
-        # Load and preprocess data from the source directory
-        source_data = self.dataset_processor.load_and_preprocess_source()
-
-        # Perform train-test split
-        train_data, val_data = train_test_split(
-            source_data,
-            test_size=self.config['dataset'].get('test_size', 0.2),
-            random_state=self.config['training']['seed']
-        )
-
-        if not train_data or not val_data:
-            raise ConfigurationError("Failed to split the dataset into training and validation sets.")
-
-        # Assign split data to the DatasetProcessor
-        self.dataset_processor.train_data = train_data
-        self.dataset_processor.val_data = val_data
-
-        # Prepare train and validation datasets
-        max_length = self.config['dataset']['max_seq_len']
-        self.train_dataset = self.dataset_processor.get_train_dataset(
-            tokenizer=self.tokenizer,
-            max_length=max_length
-        )
-        self.val_dataset = self.dataset_processor.get_val_dataset(
-            tokenizer=self.tokenizer,
-            max_length=max_length
-        )
-
-        # Initialize data loaders
-        self.train_loader = DataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config['training']['batch_size'],
-            shuffle=True,
-            num_workers=self.config['training'].get('num_workers', 4),
-            pin_memory=self.config['training'].get('pin_memory', True),
-            collate_fn=TextDataset.collate_fn,
-            drop_last=self.config['training'].get('drop_last', False)
-        )
-
-        self.val_loader = DataLoader(
-            dataset=self.val_dataset,
-            batch_size=self.config['training']['batch_size'],
-            shuffle=False,
-            num_workers=self.config['training'].get('num_workers', 4),
-            pin_memory=self.config['training'].get('pin_memory', True),
-            collate_fn=TextDataset.collate_fn,
-            drop_last=self.config['training'].get('drop_last', False)
-        )
-
-        # Model configuration and initialization
-        model_config = TransformerConfig(
-            d_model=self.config['model']['hidden_dim'],
-            num_heads=self.config['model']['num_heads'],
-            window_size=self.config['model'].get('window_size', 4),
-            global_tokens=self.config['model'].get('global_tokens', 0),
-            d_ff=self.config['model']['ff_dim'],
-            num_layers=self.config['model']['num_layers'],
-            dropout=self.config['model']['dropout'],
-            max_seq_len=self.config['model']['max_seq_len'],
-            activation=self.config['model'].get('activation', 'gelu'),
-            use_rope=self.config['model'].get('use_rope', True),
-            prenorm=self.config['model'].get('prenorm', True),
-            vocab_size=self.config['model']['vocab_size'],
-            tie_embeddings=self.config['model'].get('tie_embeddings', False),
-            scheduler_type=self.config['training']['scheduler_type'],
-            learning_rate=self.config['training']['learning_rate'],
-            weight_decay=self.config['training']['weight_decay'],
-            warmup_ratio=self.config['training'].get('warmup_ratio', 0.1),
-            use_mixed_precision=self.config['training'].get('use_mixed_precision', True),
-            max_grad_norm=self.config['training'].get('max_grad_norm', 1.0),
-            pad_token_id=self.tokenizer.pad_token_id,
-            l2_reg=self.config['training'].get('l2_reg', 0.0),
-            use_checkpointing=self.config['model'].get('use_checkpointing', False)
-        )
-        self.model = Transformer(model_config).to(self.config['training']['device'])
-
-        # Optimizer, scheduler, and loss
-        self.optimizer = self._configure_optimizer()
-        num_training_steps = len(self.train_loader) * self.config['training']['epochs']
-        self.scheduler = get_scheduler(
-            name=self.config['training']['scheduler_type'],
-            optimizer=self.optimizer,
-            num_warmup_steps=int(num_training_steps * self.config['training'].get('warmup_ratio')),
-            num_training_steps=num_training_steps
-        )
-        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
-
-        # Memory monitor
-        self.memory_monitor = MemoryMonitor()
-
-        # Checkpoints
-        self.start_epoch = 0
-        if self.config['training']['resume_from_checkpoint']:
-            self.start_epoch = load_checkpoint(
-                self.config['training']['resume_from_checkpoint'],
-                self.model,
-                self.optimizer,
-                self.scheduler
+            split_config = self.config['dataset'].get('split', {'test_size': 0.2, 'random_state': 42})
+            preprocessing_config = self.config['dataset'].get('preprocessing', {})
+            self.dataset_processor = DatasetProcessor(
+                source_dir=source_dir,
+                split=split_config,
+                preprocessing_config=preprocessing_config
             )
 
-        # Gradient accumulation and mixed precision
-        self.gradient_accumulation_steps = self.config['training']['gradient_accumulation_steps']
-        self.scaler = torch.amp.GradScaler(enabled=self.config['training'].get('use_mixed_precision', True))
+            # Prepare train and validation datasets
+            max_length = self.config['dataset']['max_seq_len']
+            self.train_dataset = self.dataset_processor.get_train_dataset(
+                tokenizer=self.tokenizer,
+                max_length=max_length
+            )
+            self.val_dataset = self.dataset_processor.get_val_dataset(
+                tokenizer=self.tokenizer,
+                max_length=max_length
+            )
 
-    except Exception as e:
-        raise RuntimeError(f"LuminaLM Initialization failed: {e}")
+            # Initialize data loaders
+            self.train_loader = DataLoader(
+                dataset=self.train_dataset,
+                batch_size=self.config['training']['batch_size'],
+                shuffle=True,
+                num_workers=self.config['training'].get('num_workers', 1),
+                pin_memory=self.config['training'].get('pin_memory', True),
+                collate_fn=TextDataset.collate_fn,
+                drop_last=self.config['training'].get('drop_last', False)
+            )
+            self.val_loader = DataLoader(
+                dataset=self.val_dataset,
+                batch_size=self.config['training']['batch_size'],
+                shuffle=False,
+                num_workers=self.config['training'].get('num_workers', 1),
+                pin_memory=self.config['training'].get('pin_memory', True),
+                collate_fn=TextDataset.collate_fn,
+                drop_last=self.config['training'].get('drop_last', False)
+            )
+
+            # Model configuration and initialization
+            model_config = TransformerConfig(
+                d_model=self.config['model']['hidden_dim'],
+                num_heads=self.config['model']['num_heads'],
+                window_size=self.config['model'].get('window_size', 4),
+                global_tokens=self.config['model'].get('global_tokens', 0),
+                d_ff=self.config['model']['ff_dim'],
+                num_layers=self.config['model']['num_layers'],
+                dropout=self.config['model']['dropout'],
+                max_seq_len=self.config['model']['max_seq_len'],
+                activation=self.config['model'].get('activation', 'gelu'),
+                use_rope=self.config['model'].get('use_rope', True),
+                prenorm=self.config['model'].get('prenorm', True),
+                vocab_size=self.config['model']['vocab_size'],
+                tie_embeddings=self.config['model'].get('tie_embeddings', False),
+                scheduler_type=self.config['training']['scheduler_type'],
+                learning_rate=self.config['training']['learning_rate'],
+                weight_decay=self.config['training']['weight_decay'],
+                warmup_ratio=self.config['training'].get('warmup_ratio', 0.1),
+                use_mixed_precision=self.config['training'].get('use_mixed_precision', True),
+                max_grad_norm=self.config['training'].get('max_grad_norm', 1.0),
+                pad_token_id=self.tokenizer.pad_token_id,
+                l2_reg=self.config['training'].get('l2_reg', 0.0),
+                use_checkpointing=self.config['model'].get('use_checkpointing', False)
+            )
+            self.model = Transformer(model_config).to(self.config['training']['device'])
+
+            # Optimizer, scheduler, and loss
+            self.optimizer = self._configure_optimizer()
+            num_training_steps = len(self.train_loader) * self.config['training']['epochs']
+            self.scheduler = get_scheduler(
+                name=self.config['training']['scheduler_type'],
+                optimizer=self.optimizer,
+                num_warmup_steps=int(num_training_steps * self.config['training'].get('warmup_ratio')),
+                num_training_steps=num_training_steps
+            )
+            self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
+
+            # Memory monitor
+            self.memory_monitor = MemoryMonitor()
+
+            # Checkpoints
+            self.start_epoch = 0
+            if self.config['training']['resume_from_checkpoint']:
+                self.start_epoch = load_checkpoint(
+                    self.config['training']['resume_from_checkpoint'],
+                    self.model,
+                    self.optimizer,
+                    self.scheduler
+                )
+
+            # Gradient accumulation and mixed precision
+            self.gradient_accumulation_steps = self.config['training']['gradient_accumulation_steps']
+            self.scaler = GradScaler(enabled=self.config['training'].get('use_mixed_precision', True))
+
+        except Exception as e:
+            raise RuntimeError(f"LuminaLM Initialization failed: {e}")
         
     def _setup_distributed_training(self):
         """Enable distributed training if multiple GPUs available."""
@@ -254,6 +228,7 @@ class Trainer:
             if param.grad is not None:
                 wandb.log({f"gradient_norm/{name}": param.grad.norm().item()})
             wandb.log({f"parameter_norm/{name}": param.norm().item()})
+            
 
     def train_one_epoch(self, epoch: int):
         self.model.train()
@@ -405,6 +380,7 @@ def main():
         with open(data_config_path, 'r') as f:
             data_config = yaml.safe_load(f)
             print(f"Loaded data_config: {data_config_path} successfully.") # for debugging
+            print(f"data_config: {data_config}, Type: {type(data_config)}")
 
         # Ensure model directory exists
         model_dir = 'model'

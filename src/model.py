@@ -6,6 +6,8 @@ from torch.utils.checkpoint import checkpoint
 import transformers
 from typing import Dict, Optional
 
+"""This code belongs to EllanorAI and is licensed under the EllanorAI Proprietary License."""
+
 class TransformerConfig:
     """
     Configuration class for the Transformer model with sparse attention.
@@ -92,34 +94,16 @@ class TransformerConfig:
 ###############################################################################
 # Local Window Mask with Optional Global Tokens
 ###############################################################################
-def build_local_window_mask(
-    seq_len: int, 
-    window_size: int, 
-    global_tokens: int = 0
-) -> torch.Tensor:
-    """
-    Create a (seq_len, seq_len) mask with float('-inf') outside a fixed window.
-    Also supports 'global_tokens': for i < global_tokens OR j < global_tokens,
-    we allow full attention (i.e., no -inf for those positions).
-
-    If i is the query index and j is the key index:
-      - If either i < global_tokens or j < global_tokens, no -inf (global).
-      - Else, we allow attention if |i - j| <= window_size.
-      - Otherwise, fill with -inf to block attention.
-
-    Returns:
-        mask: (seq_len, seq_len) with 0 where allowed, -inf where blocked.
-    """
-    mask = torch.zeros(seq_len, seq_len, dtype=torch.float)
+def build_local_window_mask(seq_len: int, window_size: int, global_tokens: int = 0) -> torch.Tensor:
+    mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device='cuda')  # Add device
     for i in range(seq_len):
         for j in range(seq_len):
-            # If in global region, let attention be free
             if i < global_tokens or j < global_tokens:
-                continue  # no -inf
-            # Else, local window
+                continue
             if abs(i - j) > window_size:
                 mask[i, j] = float('-inf')
     return mask
+
 
 ###############################################################################
 # Sparse Multi-Head Attention with Optional KV Caching
@@ -159,34 +143,32 @@ class SparseMultiHeadAttention(nn.Module):
         x_rope = torch.cat([-x[..., 1::2], x[..., ::2]], dim=-1)
         return x * cos + x_rope * sin
 
-    def _attn_function(self, 
-                       Q, 
-                       K, 
-                       V, 
-                       local_mask, 
-                       attn_mask):
+    def _attn_function(self, Q, K, V, local_mask, attn_mask):
     # Debugging shapes
         print(f"Q shape: {Q.shape}, K shape: {K.shape}, V shape: {V.shape}, attn_mask shape: {attn_mask.shape}")
 
+    # Move all tensors to the same device as Q
+        local_mask = local_mask.to(Q.device)
+        if attn_mask is not None:
+            attn_mask = attn_mask.to(Q.device)
+
+    # Calculate attention scores
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
-    # Prepare attention mask
+    # Apply attention mask
         if attn_mask is not None:
-            attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)  # Align dimensions for broadcasting
             scores = scores.masked_fill(attn_mask == 0, float('-inf'))
 
-        # Apply softmax to scores
+    # Apply softmax to scores
         attn_weights = torch.softmax(scores, dim=-1)
 
-    # Apply local mask if applicable
-        if local_mask is not None:
-             attn_weights = attn_weights * local_mask
+    # Apply local mask
+        attn_weights = attn_weights * local_mask  # Ensure `local_mask` is on the same device
 
-    # Compute the final attention output
+    # Compute final attention output
         output = torch.matmul(attn_weights, V)
 
         return output, attn_weights
-
 
     def forward(
         self, 

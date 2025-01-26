@@ -1,7 +1,7 @@
 training:
   device: "cuda"  # Use "cuda" for GPU or "cpu" for CPU
   epochs: 5  # Number of training epochs
-  batch_size: 16  # Batch size for training
+  batch_size: 8  # Batch size for training
   learning_rate: 0.00003  # Initial learning rate
   weight_decay: 0.01  # Weight decay for AdamW optimizer
   max_grad_norm: 1.0  # Gradient clipping threshold
@@ -15,7 +15,7 @@ training:
     T_mult: 2
     eta_min: 1e-6
   warmup_ratio: 0.1  # Ratio of warmup steps for learning rate scheduler
-  gradient_accumulation_steps: 2  # Number of steps for gradient accumulation
+  gradient_accumulation_steps: 4  # Number of steps for gradient accumulation
   log_every_n_steps: 10  # Log metrics every N steps
   eval_every_n_epochs: 1  # Evaluate the model every N epochs
   early_stopping_patience: 3  # Number of epochs to wait for validation loss improvement before early stopping
@@ -25,7 +25,7 @@ training:
 dataset:
   train_dataset: "local_data"  # Reference to the dataset name in datasets.yaml
   max_seq_len: 512  # Maximum sequence length for tokenization
-  num_workers: 4  # Number of workers for data loading
+  num_workers: 1  # Number of workers for data loading
   shuffle: true  # Shuffle the training data
   preprocessing:
     lowercase: true  # Convert all text to lowercase
