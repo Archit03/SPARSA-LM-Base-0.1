@@ -9,19 +9,6 @@ datasets:
       - "*.csv"
     csv_text_column: "text" 
 
-- name: medical_textbook
-  type: huggingface
-  config:
-    dataset_name: "zxvix/MedicalTextbook"
-    config_name: "Anatomy_Gray"
-    cache_dir: "cache/medical"
-
-- name: openwebtext
-  type: huggingface
-  config:
-    dataset_name: "stas/openwebtext-10k"
-    cache_dir: "cache/openwebtext" 
-
 - name: hari560
   type: huggingface
   config:

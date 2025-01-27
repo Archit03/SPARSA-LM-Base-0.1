@@ -14,29 +14,29 @@ class TransformerConfig:
     Includes parameter validation and type hints for better usability.
     """
     def __init__(
-        self,
-        d_model: int = 512,
-        num_heads: int = 8,
-        window_size: int = 4,
-        global_tokens: int = 0,
-        d_ff: int = 2048,
-        num_layers: int = 6,
-        dropout: float = 0.1,
-        max_seq_len: int = 4096,
-        activation: str = "relu",
-        use_rope: bool = True,
-        prenorm: bool = True,
-        vocab_size: int = 32000,
-        tie_embeddings: bool = False,
-        scheduler_type: str = "cosine",
-        learning_rate: float = 1e-4,
-        weight_decay: float = 0.0,
-        warmup_ratio: float = 0.1,
-        use_mixed_precision: bool = True,
-        max_grad_norm: float = 0.0,
-        pad_token_id: int = 0,
-        l2_reg: float = 0.0,
-        use_checkpointing: bool = False
+            self,
+            d_model: int = 256,  # Reduced to lower the model size
+            num_heads: int = 4,  # Adjusted to match d_model (d_model must be divisible by num_heads)
+            window_size: int = 4,
+            global_tokens: int = 0,
+            d_ff: int = 1024,  # Reduced to lower the model size
+            num_layers: int = 4,  # Fewer layers to fit the target parameter count
+            dropout: float = 0.1,
+            max_seq_len: int = 1024,  # Adjusted to suit a smaller model
+            activation: str = "relu",
+            use_rope: bool = True,
+            prenorm: bool = True,
+            vocab_size: int = 10000,  # Reduced vocabulary size
+            tie_embeddings: bool = False,
+            scheduler_type: str = "cosine",
+            learning_rate: float = 1e-4,
+            weight_decay: float = 0.0,
+            warmup_ratio: float = 0.1,
+            use_mixed_precision: bool = True,
+            max_grad_norm: float = 0.0,
+            pad_token_id: int = 0,
+            l2_reg: float = 0.0,
+            use_checkpointing: bool = False
     ):
         # Input validation
         if d_model % num_heads != 0:
@@ -143,32 +143,58 @@ class SparseMultiHeadAttention(nn.Module):
         x_rope = torch.cat([-x[..., 1::2], x[..., ::2]], dim=-1)
         return x * cos + x_rope * sin
 
-    def _attn_function(self, Q, K, V, local_mask, attn_mask):
-    # Debugging shapes
+    def attn_function(self, Q, K, V, local_mask, attn_mask):
+        """
+        Perform scaled dot-product attention with support for sparse local window masking 
+        and optional additive attention masking.
+
+
+    Args:
+        Q (torch.Tensor): Query tensor of shape (batch_size, num_heads, seq_len, head_dim).
+        K (torch.Tensor): Key tensor of shape (batch_size, num_heads, seq_len, head_dim).
+        V (torch.Tensor): Value tensor of shape (batch_size, num_heads, seq_len, head_dim).
+        local_mask (torch.Tensor): Local window mask tensor of shape (seq_len, seq_len).
+                                   Indicates positions to mask out based on a local window.
+        attn_mask (Optional[torch.Tensor]): Additive attention mask of shape 
+                                            (batch_size, seq_len) or 
+                                            (batch_size, seq_len, seq_len).
+                                            Used to mask certain tokens or positions 
+                                            in the attention computation.
+        
+        Returns:
+        Tuple[torch.Tensor, torch.Tensor]:
+            - output (torch.Tensor): The resulting tensor after applying attention,
+              of shape (batch_size, num_heads, seq_len, head_dim).
+            - scores (torch.Tensor): The normalized attention scores of shape 
+              (batch_size, num_heads, seq_len, seq_len).
+        
+        Notes:
+        - This function uses scaled dot-product attention.
+        - Handles broadcasting and alignment of attention masks to match `Q`, `K`, and `V`.
+        - Supports masking out-of-window positions using `local_mask` and
+          masking specific tokens or positions using `attn_mask`.
+          
+        """
         print(f"Q shape: {Q.shape}, K shape: {K.shape}, V shape: {V.shape}, attn_mask shape: {attn_mask.shape}")
+        batch_size, num_heads, seq_len, _ = Q.size()
+        local_mask = local_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, num_heads, seq_len, seq_len)  # (1, 1, seq_len, seq_len)
 
-    # Move all tensors to the same device as Q
-        local_mask = local_mask.to(Q.device)
         if attn_mask is not None:
-            attn_mask = attn_mask.to(Q.device)
-
-    # Calculate attention scores
+            attn_mask = attn_mask[:, None, None, :].expand(batch_size, num_heads, seq_len, seq_len)
+        
+        #Calculate attention scores
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
-    # Apply attention mask
         if attn_mask is not None:
-            scores = scores.masked_fill(attn_mask == 0, float('-inf'))
+            scores += attn_mask
+        scores = scores + local_mask
+        scores = scores.softmax(dim=-1)
 
-    # Apply softmax to scores
-        attn_weights = torch.softmax(scores, dim=-1)
+        #Compute final attn output
+        output = torch.matmul(scores, V)
 
-    # Apply local mask
-        attn_weights = attn_weights * local_mask  # Ensure `local_mask` is on the same device
+        return output, scores
 
-    # Compute final attention output
-        output = torch.matmul(attn_weights, V)
-
-        return output, attn_weights
 
     def forward(
         self, 
@@ -222,7 +248,7 @@ class SparseMultiHeadAttention(nn.Module):
         # 5) Compute attention
         # We'll define a function for checkpoint if needed
         def fn_attention(Q_, K__, V__):
-            return self._attn_function(Q_, K__, V__, local_mask, attn_mask)
+            return self.attn_function(Q_, K__, V__, local_mask, attn_mask)
         
         if self.config.use_checkpointing and Q.requires_grad:
             # For memory efficiency, checkpoint the attention function

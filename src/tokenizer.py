@@ -1500,8 +1500,8 @@ class ChunkManager:
     def get_chunk_size(self) -> int:
         """Calculate optimal chunk size based on available memory"""
         available_memory = psutil.virtual_memory().available
-        # Use 80% of available memory (increased from previous value)
-        return max(self.min_chunk_size, int(available_memory * 0.8 / 8192))
+        # Use 10% of available memory (increased from previous value)
+        return max(self.min_chunk_size, int(available_memory * 0.1 / 8192))
 
 class AsyncFileProcessor:
     """Enhanced asynchronous file operations handler"""
@@ -1913,7 +1913,7 @@ def process_streaming_dataset(dataset: Any, output_path: Path, chunk_size: int, 
                             buffer.clear()
                             
                             # Force garbage collection if memory usage is high
-                            if psutil.virtual_memory().percent > 90:
+                            if psutil.virtual_memory().percent > 80:
                                 gc.collect()
 
                 # Process remaining items

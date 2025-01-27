@@ -4,7 +4,7 @@
 PYTHON_PATH="python"
 SCRIPT_PATH="src/tokenizer.py"
 LOG_DIR="$HOME/Desktop/SPARSA-LM-Base 0.1/logs"
-VOCAB_SIZE=32000
+VOCAB_SIZE=10000
 MIN_FREQ=2
 DATASET_CONFIG="$HOME/Desktop/SPARSA-LM-Base 0.1/config/dataset_config.yaml"
 CACHE_DIR="$HOME/Desktop/SPARSA-LM-Base 0.1/data/processed/cache"
