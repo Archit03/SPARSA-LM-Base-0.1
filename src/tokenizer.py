@@ -2004,18 +2004,56 @@ def parse_args():
     return parser.parse_args()
 
 def train_tokenizer(texts: List[str], args: argparse.Namespace) -> Tokenizer:
-    """Train a tokenizer on the given texts"""
-    special_tokens = args.special_tokens if hasattr(args, 'special_tokens') else []
-    trainer = BpeTrainer(
-        vocab_size=args.vocab_size,
-        min_frequency=args.min_frequency,
-        special_tokens=special_tokens
-    )
-    trainer.train_from_iterator(texts, length=len(texts))
-    return trainer.tokenizer
+    """Train a tokenizer on the given texts with memory-efficient batch processing"""
+    try:
+        # Initialize tokenizer with BPE model
+        tokenizer = Tokenizer(BPE())
+        tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
+
+        # Configure trainer
+        trainer = BpeTrainer(
+            vocab_size=args.vocab_size,
+            min_frequency=args.min_frequency,
+            special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"],
+            show_progress=True
+        )
+
+        # Calculate batch size based on available memory
+        available_memory = psutil.virtual_memory().available
+        batch_size = max(1000, min(5000, int(available_memory / (1024 * 1024 * 10))))  # 10MB per batch estimate
+        
+        logging.info(f"Processing {len(texts)} texts in batches of {batch_size}")
+        
+        # Process texts in batches
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            
+            # Clear memory before processing each batch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Check memory usage and wait if necessary
+            while psutil.virtual_memory().percent > 90:
+                logging.warning("High memory usage, waiting before processing next batch...")
+                time.sleep(5)
+                gc.collect()
+            
+            try:
+                tokenizer.train_from_iterator(batch, trainer=trainer)
+                logging.info(f"Processed batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+            except Exception as e:
+                logging.error(f"Error processing batch {i//batch_size + 1}: {str(e)}")
+                continue
+
+        return tokenizer
+
+    except Exception as e:
+        logging.error(f"Error during tokenizer training: {str(e)}")
+        raise
 
 def main():
-    """Main function for tokenizer training"""
+    """Main function for tokenizer training with improved memory management"""
     try:
         args = parse_args()
         
@@ -2035,50 +2073,58 @@ def main():
             
         if not validate_dataset_config(dataset_config):
             raise ValueError("Invalid dataset configuration")
-            
-        # Start tokenizer training process
-        print("Starting tokenizer training...")
-        datasets = load_datasets(dataset_config, args.cache_dir)
         
-        # Initialize tokenizer trainer
-        trainer = TokenizerTrainer(
-            vocab_size=args.vocab_size,
-            min_frequency=args.min_frequency
-        )
-        
-        # Process datasets
+        # Process datasets with memory monitoring
         texts = []
-        for dataset_name, dataset in datasets['datasets'].items():
+        memory_monitor = MemoryManager()
+        
+        for dataset_config in dataset_config['datasets']:
+            dataset_name = dataset_config['name']
             logging.info(f"Processing dataset: {dataset_name}")
             
-            # Handle different dataset types
-            if dataset_name == 'local':
-                # For local datasets, process each text directly
-                for text in dataset:
-                    if isinstance(text, str) and text.strip():
-                        trainer.add_texts(text)
-            else:
-                # For HuggingFace datasets, extract text from items
-                if isinstance(dataset, list):
-                    for item in dataset:
-                        if isinstance(item, dict):
-                            text = item.get('text', '')
-                            if text and isinstance(text, str):
-                                trainer.add_texts(text)
-                        elif isinstance(item, str):
-                            trainer.add_texts(item)
+            try:
+                # Load dataset based on type
+                if dataset_config['type'] == 'local':
+                    dataset_texts = load_local_dataset(dataset_config['config'])
+                else:  # huggingface
+                    dataset_texts = load_dataset_from_config(dataset_config['config'])
+                
+                if dataset_texts:
+                    # Process texts in chunks to manage memory
+                    chunk_size = memory_monitor.get_safe_chunk_size()
+                    for i in range(0, len(dataset_texts), chunk_size):
+                        chunk = dataset_texts[i:i + chunk_size]
+                        texts.extend(chunk)
+                        
+                        # Monitor memory and clean up if necessary
+                        if memory_monitor.check_memory()[0]:
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            
+            except Exception as e:
+                logging.error(f"Error processing dataset {dataset_name}: {str(e)}")
+                continue
+        
+        if not texts:
+            raise ValueError("No texts loaded from datasets")
         
         # Train tokenizer
-        tokenizer = trainer.train()
+        tokenizer = train_tokenizer(texts, args)
         
         # Save trained tokenizer
         output_dir = Path('C:\\Users\\ASUS\\Desktop\\SPARSA-LM-Base 0.1\\data\\processed\\tokenizer')
         output_dir.mkdir(exist_ok=True)
         output_path = output_dir / "tokenizer.json"
-        tokenizer.save(str(output_path))
         
-        logging.info(f"Tokenizer saved to {output_path}")
-        print(f"Tokenizer training completed successfully. Saved to {output_path}")
+        # Save with error handling
+        try:
+            tokenizer.save(str(output_path))
+            logging.info(f"Tokenizer saved to {output_path}")
+            print(f"Tokenizer training completed successfully. Saved to {output_path}")
+        except Exception as e:
+            logging.error(f"Error saving tokenizer: {str(e)}")
+            raise
         
     except Exception as e:
         logging.error(f"Error during tokenizer training: {str(e)}")
