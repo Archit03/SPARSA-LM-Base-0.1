@@ -1795,33 +1795,40 @@ def process_local_file(file_path: Path) -> Optional[str]:
         logging.error(f"Error processing file {file_path}: {str(e)}")
         return None
 
-def load_local_dataset(config: dict) -> List[str]:
-    """Load local dataset with proper pattern handling."""
-    path = Path(config['path'])
-    patterns = config.get('patterns', ['*.txt'])
-    if isinstance(patterns, str):
-        patterns = [patterns]
+def load_local_dataset(config: Dict[str, Any]) -> Iterator[str]:
+    """Load local dataset as a generator to avoid memory issues"""
+    path = Path(config.get('path', ''))
+    if not path.exists() or not path.is_dir():
+        logging.error(f"Invalid dataset path: {path}")
+        return
+
+    pattern = config.get('pattern', '*.txt')
     
-    files = []
-    for pattern in patterns:
-        # Use glob instead of rglob for pattern matching
-        if '**' in pattern:
-            files.extend(path.glob(pattern))
-        else:
-            files.extend(path.glob(pattern))
+    def text_generator():
+        for file_path in path.glob(pattern):
+            try:
+                # Check file size before processing
+                if file_path.stat().st_size > 100 * 1024 * 1024:  # Skip files larger than 100MB
+                    logging.warning(f"Skipping large file: {file_path}")
+                    continue
+                    
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    # Read file line by line
+                    for line in f:
+                        line = line.strip()
+                        if line:  # Only yield non-empty lines
+                            yield line
+                            
+                # Clear memory after each file
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    
+            except Exception as e:
+                logging.error(f"Error processing file {file_path}: {str(e)}")
+                continue
     
-    if not files:
-        logging.warning(f"No files found in {path} matching patterns: {patterns}")
-        return []
-    
-    processed_texts = []
-    with tqdm(total=len(files), desc="Processing local files") as pbar:
-        for file in files:
-            if text := process_local_file(file):
-                processed_texts.append(text)
-            pbar.update(1)
-    
-    return processed_texts
+    return text_generator()
 
 def load_dataset_from_config(config: dict) -> Optional[Any]:
     """Load a dataset based on configuration."""
@@ -2093,63 +2100,94 @@ def main():
         if not validate_dataset_config(dataset_config):
             raise ValueError("Invalid dataset configuration")
         
-        # Process datasets with streaming
-        texts = []
-        memory_monitor = MemoryManager()
-        
-        # Process each dataset separately
-        for dataset_config in dataset_config['datasets']:
-            dataset_name = dataset_config['name']
-            logging.info(f"Processing dataset: {dataset_name}")
+        # Create temporary directory for storing processed texts
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir = Path(temp_dir)
+            chunk_files = []
+            current_file = None
+            current_size = 0
+            max_file_size = 10 * 1024 * 1024  # 10MB per file
+            total_texts = 0
+            
+            # Process each dataset
+            for dataset_config in dataset_config['datasets']:
+                dataset_name = dataset_config['name']
+                logging.info(f"Processing dataset: {dataset_name}")
+                
+                try:
+                    # Get text iterator based on dataset type
+                    if dataset_config['type'] == 'local':
+                        text_iterator = load_local_dataset(dataset_config['config'])
+                    else:  # huggingface
+                        dataset = load_dataset_from_config(dataset_config['config'])
+                        text_iterator = (text for text in dataset if isinstance(text, str) and text.strip())
+                    
+                    # Process texts one at a time
+                    for text in text_iterator:
+                        # Create new file if needed
+                        if current_file is None or current_size >= max_file_size:
+                            if current_file is not None:
+                                current_file.close()
+                            current_file = open(temp_dir / f"chunk_{len(chunk_files)}.txt", 'w', encoding='utf-8')
+                            chunk_files.append(current_file.name)
+                            current_size = 0
+                        
+                        # Write single text with newline
+                        try:
+                            current_file.write(text + '\n')
+                            current_size += len(text.encode('utf-8')) + 1
+                            total_texts += 1
+                            
+                            # Periodic cleanup and progress update
+                            if total_texts % 1000 == 0:
+                                logging.info(f"Processed {total_texts} texts")
+                                gc.collect()
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                                
+                        except Exception as e:
+                            logging.warning(f"Failed to write text: {str(e)}")
+                            continue
+                            
+                except Exception as e:
+                    logging.error(f"Error processing dataset {dataset_name}: {str(e)}")
+                    continue
+            
+            # Close last file
+            if current_file is not None:
+                current_file.close()
+            
+            if not chunk_files:
+                raise ValueError("No texts were successfully processed")
+            
+            logging.info(f"Total processed texts: {total_texts}")
+            
+            # Train tokenizer on files
+            tokenizer = Tokenizer(BPE())
+            tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
+            
+            trainer = BpeTrainer(
+                vocab_size=args.vocab_size,
+                min_frequency=args.min_frequency,
+                special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"],
+                show_progress=True
+            )
+            
+            logging.info(f"Training tokenizer on {len(chunk_files)} files")
+            tokenizer.train(files=chunk_files, trainer=trainer)
+            
+            # Save trained tokenizer
+            output_dir = Path('C:\\Users\\ASUS\\Desktop\\SPARSA-LM-Base 0.1\\data\\processed\\tokenizer')
+            output_dir.mkdir(exist_ok=True)
+            output_path = output_dir / "tokenizer.json"
             
             try:
-                # Load and process dataset in chunks
-                if dataset_config['type'] == 'local':
-                    dataset_texts = load_local_dataset(dataset_config['config'])
-                else:  # huggingface
-                    dataset_texts = load_dataset_from_config(dataset_config['config'])
-                
-                if dataset_texts:
-                    # Process in very small chunks
-                    chunk_size = 100  # Reduced further
-                    for i in range(0, len(dataset_texts), chunk_size):
-                        chunk = dataset_texts[i:i + chunk_size]
-                        texts.extend(t for t in chunk if isinstance(t, str) and t.strip())
-                        
-                        # Force memory cleanup
-                        del chunk
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        
-                        # Check memory and wait if necessary
-                        while psutil.virtual_memory().percent > 85:
-                            logging.warning("High memory usage, waiting...")
-                            time.sleep(5)
-                            gc.collect()
-                            
+                tokenizer.save(str(output_path))
+                logging.info(f"Tokenizer saved to {output_path}")
+                print(f"Tokenizer training completed successfully. Saved to {output_path}")
             except Exception as e:
-                logging.error(f"Error processing dataset {dataset_name}: {str(e)}")
-                continue
-        
-        if not texts:
-            raise ValueError("No texts loaded from datasets")
-        
-        # Train tokenizer
-        tokenizer = train_tokenizer(texts, args)
-        
-        # Save trained tokenizer
-        output_dir = Path('C:\\Users\\ASUS\\Desktop\\SPARSA-LM-Base 0.1\\data\\processed\\tokenizer')
-        output_dir.mkdir(exist_ok=True)
-        output_path = output_dir / "tokenizer.json"
-        
-        try:
-            tokenizer.save(str(output_path))
-            logging.info(f"Tokenizer saved to {output_path}")
-            print(f"Tokenizer training completed successfully. Saved to {output_path}")
-        except Exception as e:
-            logging.error(f"Error saving tokenizer: {str(e)}")
-            raise
+                logging.error(f"Error saving tokenizer: {str(e)}")
+                raise
         
     except Exception as e:
         logging.error(f"Error during tokenizer training: {str(e)}")
