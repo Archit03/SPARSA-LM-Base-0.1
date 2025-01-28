@@ -60,13 +60,13 @@ class Config:
         vocab_size: Optional[int] = None,
         min_frequency: int = 2,
         log_file: str = "tokenizer.log",
-        chunk_size: int = 10000,
-        max_workers: Optional[int] = None,
+        chunk_size: int = 1000,
+        max_workers: Optional[int] = 4,
         memory_threshold: float = 0.8,
         cache_dir: str = ".cache",
         allowed_extensions: Set[str] = {'.txt', '.json', '.jsonl', '.csv'},
         allowed_mimetypes: Set[str] = {'text/plain', 'application/json', 'text/csv'},
-        max_file_size: int = 100 * 1024 * 1024,  # 100MB
+        max_file_size: int = 10000 * 1024 * 1024,  
         gpu_memory_threshold: float = 0.8
     ):
         self.local_data_path = local_data_path
