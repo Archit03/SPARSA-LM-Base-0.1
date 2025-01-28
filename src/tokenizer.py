@@ -1067,7 +1067,7 @@ class DatasetProcessor:
 
 
 class TokenizerTrainer:
-    """Trainer class for tokenizer with enhanced features"""
+    """Trainer class for tokenizer with enhanced memory management"""
     
     def __init__(self, vocab_size: int = 32000, min_frequency: int = 2):
         self.vocab_size = vocab_size
@@ -1079,65 +1079,110 @@ class TokenizerTrainer:
             special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"],
             show_progress=True
         )
-        self.texts = []
-        self.files = []
-
-    def add_files(self, path: Union[str, Path]) -> 'TokenizerTrainer':
-        """Add files for training"""
-        try:
-            if isinstance(path, str):
-                path = Path(path)
-                
-            if isinstance(path, Path):
-                if path.is_file():
-                    self.files.append(str(path))
-                elif path.is_dir():
-                    self.files.extend([str(f) for f in path.glob("*.txt")])
-            else:
-                logging.warning(f"Skipping invalid path: {path}")
-                
-        except Exception as e:
-            logging.error(f"Error adding file {path}: {str(e)}")
-            
-        return self
+        self.chunk_size = 1000  # Process texts in smaller chunks
+        self.memory_manager = MemoryManager()
+        self.temp_files = []
 
     def add_texts(self, texts: Union[str, List[str], Iterator[str]]) -> 'TokenizerTrainer':
-        """Add texts for training"""
-        if isinstance(texts, str):
-            self.texts.append(texts)
-        elif isinstance(texts, (list, Iterator)):
+        """Add texts for training with memory-efficient processing"""
+        try:
+            # Create temporary directory if needed
+            temp_dir = Path(tempfile.mkdtemp())
+            temp_file = temp_dir / f"texts_{len(self.temp_files)}.txt"
+            self.temp_files.append(temp_file)
+
+            # Process texts in chunks
+            buffer = []
+            
+            def flush_buffer():
+                if buffer:
+                    with open(temp_file, 'a', encoding='utf-8') as f:
+                        f.write('\n'.join(buffer) + '\n')
+                    buffer.clear()
+                    gc.collect()
+
+            if isinstance(texts, str):
+                texts = [texts]
+
             for text in texts:
                 if isinstance(text, dict):
-                    # Handle dataset dictionary format
                     text = text.get('text', '')
                 if text and isinstance(text, str):
-                    self.texts.append(text)
+                    buffer.append(text)
+                    if len(buffer) >= self.chunk_size:
+                        flush_buffer()
+
+                    # Check memory usage and adjust if needed
+                    if self.memory_manager.check_memory()[0]:
+                        self.chunk_size = max(100, self.chunk_size // 2)
+                        gc.collect()
+
+            # Flush remaining texts
+            flush_buffer()
+
+        except Exception as e:
+            logging.error(f"Error adding texts: {str(e)}")
+            raise
+
         return self
 
     def train(self) -> Tokenizer:
-        """Train the tokenizer"""
+        """Train the tokenizer with memory-efficient processing"""
         try:
-            # Set up pre-tokenizer
-            self.tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
-            
-            # Train from files if available
-            if self.files:
-                logging.info(f"Training tokenizer on {len(self.files)} files")
-                self.tokenizer.train(files=self.files, trainer=self.trainer)
-            
-            # Train from texts if available
-            if self.texts:
-                logging.info(f"Training tokenizer on {len(self.texts)} texts")
-                self.tokenizer.train_from_iterator(self.texts, trainer=self.trainer)
-            
-            if not self.files and not self.texts:
-                raise ValueError("No training data provided")
-            
+            # Process files in chunks
+            for temp_file in tqdm(self.temp_files, desc="Training tokenizer"):
+                if not temp_file.exists():
+                    continue
+
+                # Train on chunks of the file
+                with open(temp_file, 'r', encoding='utf-8') as f:
+                    chunk = []
+                    for line in f:
+                        chunk.append(line.strip())
+                        if len(chunk) >= self.chunk_size:
+                            self.tokenizer.train_from_iterator(
+                                chunk,
+                                trainer=self.trainer,
+                                length=len(chunk)
+                            )
+                            chunk.clear()
+                            gc.collect()
+
+                    # Process remaining lines
+                    if chunk:
+                        self.tokenizer.train_from_iterator(
+                            chunk,
+                            trainer=self.trainer,
+                            length=len(chunk)
+                        )
+
+                # Clean up temporary file
+                temp_file.unlink()
+
             return self.tokenizer
-            
+
         except Exception as e:
-            logging.error(f"Tokenizer training failed: {str(e)}")
+            logging.error(f"Error training tokenizer: {str(e)}")
             raise
+
+        finally:
+            # Clean up temporary directory
+            self._cleanup()
+
+    def _cleanup(self):
+        """Clean up temporary files"""
+        try:
+            for temp_file in self.temp_files:
+                if temp_file.exists():
+                    temp_file.unlink()
+            if self.temp_files and self.temp_files[0].parent.exists():
+                self.temp_files[0].parent.rmdir()
+        except Exception as e:
+            logging.warning(f"Error cleaning up temporary files: {str(e)}")
+
+    def __del__(self):
+        """Ensure cleanup on deletion"""
+        self._cleanup()
 
 class GPUMemoryMonitor:
     """Enhanced GPU memory monitor with fallback mechanisms"""
@@ -1318,7 +1363,7 @@ class DatasetProcessor:
     def _process_streaming_dataset(self, dataset: Any, output_path: Path) -> Optional[str]:
         """Process streaming dataset with optimized batch handling"""
         try:
-            with open(output_path, 'wb', buffering=1024*1024*8) as f:  # 8MB buffer
+            with open(output_path, 'wb', buffering=1024*1024*4) as f:  # 4MB buffer
                 batch = []
                 total_processed = 0
                 start_time = time.time()
@@ -2032,35 +2077,47 @@ def main():
         print("Starting tokenizer training...")
         datasets = load_datasets(dataset_config, args.cache_dir)
         
-        # Initialize tokenizer trainer
+        # Initialize tokenizer trainer with memory-efficient settings
         trainer = TokenizerTrainer(
             vocab_size=args.vocab_size,
             min_frequency=args.min_frequency
         )
         
-        # Process datasets
-        texts = []
-        for dataset_name, dataset in datasets['datasets'].items():
-            logging.info(f"Processing dataset: {dataset_name}")
-            
-            # Handle different dataset types
-            if dataset_name == 'local':
-                # For local datasets, process each text directly
-                for text in dataset:
-                    if isinstance(text, str) and text.strip():
-                        trainer.add_texts(text)
-            else:
-                # For HuggingFace datasets, extract text from items
-                if isinstance(dataset, list):
-                    for item in dataset:
-                        if isinstance(item, dict):
-                            text = item.get('text', '')
-                            if text and isinstance(text, str):
-                                trainer.add_texts(text)
-                        elif isinstance(item, str):
-                            trainer.add_texts(item)
+        # Process datasets with progress tracking
+        total_texts = sum(len(dataset) for dataset in datasets['datasets'].values())
+        with tqdm(total=total_texts, desc="Processing texts") as pbar:
+            for dataset_name, dataset in datasets['datasets'].items():
+                logging.info(f"Processing dataset: {dataset_name}")
+                
+                # Process in smaller batches
+                batch = []
+                batch_size = 1000  # Smaller batch size for memory efficiency
+                
+                for item in dataset:
+                    if isinstance(item, dict):
+                        text = item.get('text', '')
+                    elif isinstance(item, str):
+                        text = item
+                    else:
+                        continue
+                        
+                    if text and isinstance(text, str):
+                        batch.append(text)
+                        if len(batch) >= batch_size:
+                            trainer.add_texts(batch)
+                            pbar.update(len(batch))
+                            batch = []
+                            gc.collect()  # Force garbage collection
+                
+                # Process remaining items
+                if batch:
+                    trainer.add_texts(batch)
+                    pbar.update(len(batch))
+                    batch = []
+                    gc.collect()
         
         # Train tokenizer
+        logging.info("Training tokenizer...")
         tokenizer = trainer.train()
         
         # Save trained tokenizer
