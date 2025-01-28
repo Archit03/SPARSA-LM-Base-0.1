@@ -2004,7 +2004,7 @@ def parse_args():
     return parser.parse_args()
 
 def train_tokenizer(texts: List[str], args: argparse.Namespace) -> Tokenizer:
-    """Train a tokenizer using temporary file storage for memory efficiency"""
+    """Train a tokenizer using temporary file storage with single text processing"""
     try:
         # Initialize tokenizer
         tokenizer = Tokenizer(BPE())
@@ -2014,21 +2014,40 @@ def train_tokenizer(texts: List[str], args: argparse.Namespace) -> Tokenizer:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_dir = Path(temp_dir)
             chunk_files = []
+            current_file = None
+            current_size = 0
+            max_file_size = 10 * 1024 * 1024  # 10MB per file
             
-            # Write texts to temporary files in small chunks
-            chunk_size = 50  # Even smaller chunks
-            for i in range(0, len(texts), chunk_size):
-                chunk_file = temp_dir / f"chunk_{i}.txt"
-                valid_texts = [t for t in texts[i:i + chunk_size] if isinstance(t, str) and t.strip()]
+            # Process texts one at a time
+            for i, text in enumerate(texts):
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                    
+                # Create new file if needed
+                if current_file is None or current_size >= max_file_size:
+                    if current_file is not None:
+                        current_file.close()
+                    current_file = open(temp_dir / f"chunk_{len(chunk_files)}.txt", 'w', encoding='utf-8')
+                    chunk_files.append(current_file.name)
+                    current_size = 0
                 
-                if valid_texts:
-                    with open(chunk_file, 'w', encoding='utf-8') as f:
-                        f.write('\n'.join(valid_texts))
-                    chunk_files.append(chunk_file)
+                # Write single text with newline
+                try:
+                    current_file.write(text + '\n')
+                    current_size += len(text.encode('utf-8')) + 1
+                except Exception as e:
+                    logging.warning(f"Failed to write text at index {i}: {str(e)}")
+                    continue
                 
-                # Clear chunk from memory
-                del valid_texts
-                gc.collect()
+                # Periodic cleanup
+                if i % 1000 == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+            # Close last file
+            if current_file is not None:
+                current_file.close()
 
             # Clear main texts list from memory
             texts.clear()
@@ -2044,8 +2063,8 @@ def train_tokenizer(texts: List[str], args: argparse.Namespace) -> Tokenizer:
                 show_progress=True
             )
 
-            # Train on files directly instead of keeping texts in memory
-            tokenizer.train(files=[str(f) for f in chunk_files], trainer=trainer)
+            logging.info(f"Training tokenizer on {len(chunk_files)} files")
+            tokenizer.train(files=chunk_files, trainer=trainer)
 
         return tokenizer
 
@@ -2078,7 +2097,7 @@ def main():
         texts = []
         memory_monitor = MemoryManager()
         
-        # Process each dataset separately to avoid accumulating all texts in memory
+        # Process each dataset separately
         for dataset_config in dataset_config['datasets']:
             dataset_name = dataset_config['name']
             logging.info(f"Processing dataset: {dataset_name}")
@@ -2091,14 +2110,11 @@ def main():
                     dataset_texts = load_dataset_from_config(dataset_config['config'])
                 
                 if dataset_texts:
-                    # Use smaller chunks for memory efficiency
-                    chunk_size = 500  # Reduced chunk size
+                    # Process in very small chunks
+                    chunk_size = 100  # Reduced further
                     for i in range(0, len(dataset_texts), chunk_size):
                         chunk = dataset_texts[i:i + chunk_size]
-                        
-                        # Filter out empty or invalid texts
-                        valid_texts = [t for t in chunk if isinstance(t, str) and t.strip()]
-                        texts.extend(valid_texts)
+                        texts.extend(t for t in chunk if isinstance(t, str) and t.strip())
                         
                         # Force memory cleanup
                         del chunk
@@ -2119,7 +2135,7 @@ def main():
         if not texts:
             raise ValueError("No texts loaded from datasets")
         
-        # Train tokenizer with optimized memory usage
+        # Train tokenizer
         tokenizer = train_tokenizer(texts, args)
         
         # Save trained tokenizer
