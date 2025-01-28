@@ -554,7 +554,7 @@ class MedicalTokenizer:
     
     def __init__(
         self,
-        vocab_size: Optional[int] = 60000,
+        vocab_size: Optional[int] = 10000,
         min_frequency: int = 2,
         padding_strategy: str = 'longest',
         truncation_strategy: str = 'longest_first',
@@ -682,7 +682,7 @@ class MedicalTokenizer:
 
     def _calculate_dynamic_vocab_size(self) -> int:
         """Calculate vocabulary size."""
-        return 60000  # Fixed vocabulary size
+        return 10000  # Fixed vocabulary size
 
     def _analyze_dataset_vocabulary(self) -> int:
         """Analyze dataset to count unique tokens."""
@@ -860,7 +860,7 @@ class DatasetProcessor:
         estimated_item_size = 1024  
         
         # Use 80% of available memory for batch processing (increased from 20%)
-        target_memory = available_memory * 0.8
+        target_memory = available_memory * 0.9
         optimal_size = int(target_memory / estimated_item_size)
         
         # Increased upper bound to allow larger batches
