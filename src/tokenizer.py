@@ -285,11 +285,12 @@ class TokenizationUtilities:
 ###############################################################################
 class MemoryManager:
     """Enhanced memory manager with alerts and dynamic thresholds"""
-    def __init__(self, alert_threshold: float = 0.95, critical_threshold: float = 0.98):
+    def __init__(self, alert_threshold: float = 0.85, critical_threshold: float = 0.92):  # Lowered thresholds
         self.alert_threshold = alert_threshold
         self.critical_threshold = critical_threshold
         self.last_alert_time = 0
         self.alert_cooldown = 300
+        self.memory_buffer = 0.2  # 20% safety buffer
         
     def check_memory(self) -> Tuple[bool, str]:
         """Check memory status with detailed reporting"""
@@ -309,8 +310,9 @@ class MemoryManager:
     def get_safe_chunk_size(self, item_size_bytes: int = 8192) -> int:
         """Calculate safe chunk size based on available memory"""
         available_memory = psutil.virtual_memory().available
-        target_memory = available_memory * 0.8
-        return max(1000, int(target_memory / item_size_bytes))
+        # Reduced target memory to 50% of available
+        target_memory = available_memory * 0.5
+        return max(500, int(target_memory / item_size_bytes))  # Reduced minimum chunk size
 
     @contextmanager
     def monitor_memory(self, operation_name: str):
@@ -1468,22 +1470,17 @@ class ChunkManager:
     
     def __init__(self, memory_manager: MemoryManager):
         self.memory_manager = memory_manager
-        self.min_chunk_size = 1000  # Increased from 100
-        self.max_chunk_size = 100000  # Increased from 10000
+        self.min_chunk_size = 500  # Reduced from 1000
+        self.max_chunk_size = 50000  # Reduced from 100000
 
-    def chunk_iterator(
-        self, 
-        texts: List[str], 
-        chunk_size: Optional[int] = None
-    ) -> Generator[List[str], None, None]:
-        """Iterate over texts in memory-efficient chunks."""
+    def chunk_iterator(self, texts: List[str], chunk_size: Optional[int] = None) -> Generator[List[str], None, None]:
         if chunk_size is None:
             chunk_size = self.get_chunk_size()
             
         iterator = iter(texts)
         while True:
-            # Only reduce chunk size at very high memory usage
-            if psutil.virtual_memory().percent > 95:
+            # Reduce chunk size at lower memory threshold
+            if psutil.virtual_memory().percent > 85:  # Reduced from 95
                 chunk_size = max(self.min_chunk_size, chunk_size // 2)
                 gc.collect()
                 
@@ -1493,15 +1490,15 @@ class ChunkManager:
                 
             yield chunk
             
-            # Aggressively increase chunk size when memory is available
-            if psutil.virtual_memory().percent < 80:
-                chunk_size = min(self.max_chunk_size, chunk_size * 2)
+            # More conservative chunk size increase
+            if psutil.virtual_memory().percent < 70:  # Reduced from 80
+                chunk_size = min(self.max_chunk_size, int(chunk_size * 1.5))  # Changed from *2 to *1.5
 
     def get_chunk_size(self) -> int:
         """Calculate optimal chunk size based on available memory"""
         available_memory = psutil.virtual_memory().available
-        # Use 10% of available memory (increased from previous value)
-        return max(self.min_chunk_size, int(available_memory * 0.1 / 8192))
+        # Reduced to 5% of available memory
+        return max(self.min_chunk_size, int(available_memory * 0.05 / 8192))
 
 class AsyncFileProcessor:
     """Enhanced asynchronous file operations handler"""
@@ -1888,14 +1885,14 @@ def load_dataset_from_config(config: dict) -> Optional[Any]:
         return None
 
 def process_streaming_dataset(dataset: Any, output_path: Path, chunk_size: int, dataset_name: str) -> Optional[str]:
-    """Process streaming dataset with memory-efficient handling"""
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         batch_processor = BatchProcessor()
         buffer: List[str] = []
         total_processed = 0
 
-        with open(output_path, 'w', encoding='utf-8', buffering=8*1024*1024) as f:  # 8MB buffer
+        # Reduced buffer size to 4MB
+        with open(output_path, 'w', encoding='utf-8', buffering=4*1024*1024) as f:
             with tqdm(desc=f"Processing {dataset_name}", unit=" samples") as pbar:
                 for item in dataset:
                     if isinstance(item, dict):
@@ -1905,23 +1902,18 @@ def process_streaming_dataset(dataset: Any, output_path: Path, chunk_size: int, 
 
                     if text:
                         buffer.append(text)
+                        # Force garbage collection at lower threshold
+                        if psutil.virtual_memory().percent > 75:  # Reduced from 80
+                            gc.collect()
+                            
                         if len(buffer) >= chunk_size:
                             batch_processor.process_batch(buffer)
                             f.write('\n'.join(buffer) + '\n')
+                            f.flush()  # Added explicit flush
                             total_processed += len(buffer)
                             pbar.update(len(buffer))
                             buffer.clear()
-                            
-                            # Force garbage collection if memory usage is high
-                            if psutil.virtual_memory().percent > 80:
-                                gc.collect()
-
-                # Process remaining items
-                if buffer:
-                    batch_processor.process_batch(buffer)
-                    f.write('\n'.join(buffer) + '\n')
-                    total_processed += len(buffer)
-                    pbar.update(len(buffer))
+                            gc.collect()  # Added explicit GC after clearing buffer
 
         batch_processor.wait_completion()
         return str(output_path)
