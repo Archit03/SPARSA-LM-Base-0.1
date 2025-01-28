@@ -2004,47 +2004,48 @@ def parse_args():
     return parser.parse_args()
 
 def train_tokenizer(texts: List[str], args: argparse.Namespace) -> Tokenizer:
-    """Train a tokenizer on the given texts with memory-efficient batch processing"""
+    """Train a tokenizer using temporary file storage for memory efficiency"""
     try:
-        # Initialize tokenizer with BPE model
+        # Initialize tokenizer
         tokenizer = Tokenizer(BPE())
         tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
 
-        # Configure trainer
-        trainer = BpeTrainer(
-            vocab_size=args.vocab_size,
-            min_frequency=args.min_frequency,
-            special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"],
-            show_progress=True
-        )
-
-        # Calculate batch size based on available memory
-        available_memory = psutil.virtual_memory().available
-        batch_size = max(1000, min(5000, int(available_memory / (1024 * 1024 * 10))))  # 10MB per batch estimate
-        
-        logging.info(f"Processing {len(texts)} texts in batches of {batch_size}")
-        
-        # Process texts in batches
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
+        # Create temporary directory for storing text chunks
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir = Path(temp_dir)
+            chunk_files = []
             
-            # Clear memory before processing each batch
+            # Write texts to temporary files in small chunks
+            chunk_size = 50  # Even smaller chunks
+            for i in range(0, len(texts), chunk_size):
+                chunk_file = temp_dir / f"chunk_{i}.txt"
+                valid_texts = [t for t in texts[i:i + chunk_size] if isinstance(t, str) and t.strip()]
+                
+                if valid_texts:
+                    with open(chunk_file, 'w', encoding='utf-8') as f:
+                        f.write('\n'.join(valid_texts))
+                    chunk_files.append(chunk_file)
+                
+                # Clear chunk from memory
+                del valid_texts
+                gc.collect()
+
+            # Clear main texts list from memory
+            texts.clear()
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            
-            # Check memory usage and wait if necessary
-            while psutil.virtual_memory().percent > 90:
-                logging.warning("High memory usage, waiting before processing next batch...")
-                time.sleep(5)
-                gc.collect()
-            
-            try:
-                tokenizer.train_from_iterator(batch, trainer=trainer)
-                logging.info(f"Processed batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
-            except Exception as e:
-                logging.error(f"Error processing batch {i//batch_size + 1}: {str(e)}")
-                continue
+
+            # Train tokenizer on files
+            trainer = BpeTrainer(
+                vocab_size=args.vocab_size,
+                min_frequency=args.min_frequency,
+                special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"],
+                show_progress=True
+            )
+
+            # Train on files directly instead of keeping texts in memory
+            tokenizer.train(files=[str(f) for f in chunk_files], trainer=trainer)
 
         return tokenizer
 
@@ -2053,7 +2054,6 @@ def train_tokenizer(texts: List[str], args: argparse.Namespace) -> Tokenizer:
         raise
 
 def main():
-    """Main function for tokenizer training with improved memory management"""
     try:
         args = parse_args()
         
@@ -2074,33 +2074,43 @@ def main():
         if not validate_dataset_config(dataset_config):
             raise ValueError("Invalid dataset configuration")
         
-        # Process datasets with memory monitoring
+        # Process datasets with streaming
         texts = []
         memory_monitor = MemoryManager()
         
+        # Process each dataset separately to avoid accumulating all texts in memory
         for dataset_config in dataset_config['datasets']:
             dataset_name = dataset_config['name']
             logging.info(f"Processing dataset: {dataset_name}")
             
             try:
-                # Load dataset based on type
+                # Load and process dataset in chunks
                 if dataset_config['type'] == 'local':
                     dataset_texts = load_local_dataset(dataset_config['config'])
                 else:  # huggingface
                     dataset_texts = load_dataset_from_config(dataset_config['config'])
                 
                 if dataset_texts:
-                    # Process texts in chunks to manage memory
-                    chunk_size = memory_monitor.get_safe_chunk_size()
+                    # Use smaller chunks for memory efficiency
+                    chunk_size = 500  # Reduced chunk size
                     for i in range(0, len(dataset_texts), chunk_size):
                         chunk = dataset_texts[i:i + chunk_size]
-                        texts.extend(chunk)
                         
-                        # Monitor memory and clean up if necessary
-                        if memory_monitor.check_memory()[0]:
+                        # Filter out empty or invalid texts
+                        valid_texts = [t for t in chunk if isinstance(t, str) and t.strip()]
+                        texts.extend(valid_texts)
+                        
+                        # Force memory cleanup
+                        del chunk
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        
+                        # Check memory and wait if necessary
+                        while psutil.virtual_memory().percent > 85:
+                            logging.warning("High memory usage, waiting...")
+                            time.sleep(5)
                             gc.collect()
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
                             
             except Exception as e:
                 logging.error(f"Error processing dataset {dataset_name}: {str(e)}")
@@ -2109,7 +2119,7 @@ def main():
         if not texts:
             raise ValueError("No texts loaded from datasets")
         
-        # Train tokenizer
+        # Train tokenizer with optimized memory usage
         tokenizer = train_tokenizer(texts, args)
         
         # Save trained tokenizer
@@ -2117,7 +2127,6 @@ def main():
         output_dir.mkdir(exist_ok=True)
         output_path = output_dir / "tokenizer.json"
         
-        # Save with error handling
         try:
             tokenizer.save(str(output_path))
             logging.info(f"Tokenizer saved to {output_path}")
