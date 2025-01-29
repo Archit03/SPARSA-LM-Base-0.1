@@ -9,6 +9,85 @@ from typing import Dict, Optional, List, Tuple, Union
 """This code belongs to EllanorAI and is licensed under the EllanorAI Proprietary License."""
 
 ###############################################################################
+# Transformer Configuration
+###############################################################################
+class TransformerConfig:
+    def __init__(
+        self,
+        # Model Architecture
+        vocab_size: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        dropout: float,
+        
+        # Attention Mechanisms
+        use_rope: bool,
+        window_size: int,
+        global_tokens: int,
+        
+        # Training Features
+        use_checkpointing: bool = False,
+        use_regularization: bool = False,
+        use_mixed_precision: bool = False,
+        label_smoothing: float = 0.0,
+        l2_reg: float = 0.0,
+        max_grad_norm: float = 1.0,
+        
+        # Optimization
+        learning_rate: float = 1e-4,
+        weight_decay: float = 0.01,
+        warmup_ratio: float = 0.1,
+        scheduler_type: str = "linear_warmup",
+        
+        # Special Tokens
+        pad_token_id: int = 0,
+        
+        # Model Behavior
+        activation: str = "gelu"  # Options: "gelu", "relu", "silu"
+    ):
+        """Initialize transformer configuration with validation."""
+        # Validate core architecture parameters
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        assert activation in ["gelu", "relu", "silu"], f"Unsupported activation: {activation}"
+        
+        # Model Architecture
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.max_seq_len = max_seq_len
+        self.dropout = dropout
+        
+        # Attention Mechanisms
+        self.use_rope = use_rope
+        self.window_size = window_size
+        self.global_tokens = global_tokens
+        
+        # Training Features
+        self.use_checkpointing = use_checkpointing
+        self.use_regularization = use_regularization
+        self.use_mixed_precision = use_mixed_precision
+        self.label_smoothing = label_smoothing
+        self.l2_reg = l2_reg
+        self.max_grad_norm = max_grad_norm
+        
+        # Optimization
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.warmup_ratio = warmup_ratio
+        self.scheduler_type = scheduler_type
+        
+        # Special Tokens
+        self.pad_token_id = pad_token_id
+        
+        # Model Behavior
+        self.activation = activation
+
+###############################################################################
 # Core Components - Positional Encodings
 ###############################################################################
 class RotaryPositionalEmbedding(nn.Module):
@@ -537,82 +616,6 @@ class Decoder(nn.Module):
 ###############################################################################
 # Full Encoder–Decoder Transformer with Advanced Training Features
 ###############################################################################
-class TransformerConfig:
-    def __init__(
-        self,
-        # Model Architecture
-        vocab_size: int,
-        d_model: int,
-        num_layers: int,
-        num_heads: int,
-        d_ff: int,
-        max_seq_len: int,
-        dropout: float,
-        
-        # Attention Mechanisms
-        use_rope: bool,
-        window_size: int,
-        global_tokens: int,
-        
-        # Training Features
-        use_checkpointing: bool = False,
-        use_regularization: bool = False,
-        use_mixed_precision: bool = False,
-        label_smoothing: float = 0.0,
-        l2_reg: float = 0.0,
-        max_grad_norm: float = 1.0,
-        
-        # Optimization
-        learning_rate: float = 1e-4,
-        weight_decay: float = 0.01,
-        warmup_ratio: float = 0.1,
-        scheduler_type: str = "linear_warmup",
-        
-        # Special Tokens
-        pad_token_id: int = 0,
-        
-        # Model Behavior
-        activation: str = "gelu"  # Options: "gelu", "relu", "silu"
-    ):
-        """Initialize transformer configuration with validation."""
-        # Validate core architecture parameters
-        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-        assert activation in ["gelu", "relu", "silu"], f"Unsupported activation: {activation}"
-        
-        # Model Architecture
-        self.vocab_size = vocab_size
-        self.d_model = d_model
-        self.num_layers = num_layers
-        self.num_heads = num_heads
-        self.d_ff = d_ff
-        self.max_seq_len = max_seq_len
-        self.dropout = dropout
-        
-        # Attention Mechanisms
-        self.use_rope = use_rope
-        self.window_size = window_size
-        self.global_tokens = global_tokens
-        
-        # Training Features
-        self.use_checkpointing = use_checkpointing
-        self.use_regularization = use_regularization
-        self.use_mixed_precision = use_mixed_precision
-        self.label_smoothing = label_smoothing
-        self.l2_reg = l2_reg
-        self.max_grad_norm = max_grad_norm
-        
-        # Optimization
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
-        self.warmup_ratio = warmup_ratio
-        self.scheduler_type = scheduler_type
-        
-        # Special Tokens
-        self.pad_token_id = pad_token_id
-        
-        # Model Behavior
-        self.activation = activation
-
 class Transformer(nn.Module):
     def __init__(
         self,
