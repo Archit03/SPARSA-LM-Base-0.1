@@ -29,6 +29,9 @@ class TransformerConfig:
         window_size: int,
         global_tokens: int,
         
+        # Architecture Options
+        prenorm: bool = True,
+        
         # Training Features
         use_checkpointing: bool = False,
         use_regularization: bool = False,
@@ -68,6 +71,9 @@ class TransformerConfig:
         self.window_size = window_size
         self.global_tokens = global_tokens
         
+        # Architecture Options
+        self.prenorm = prenorm
+        
         # Training Features
         self.use_checkpointing = use_checkpointing
         self.use_regularization = use_regularization
@@ -105,6 +111,9 @@ class TransformerConfig:
             use_rope=True,
             window_size=256,
             global_tokens=8,
+            
+            # Architecture Options
+            prenorm=True,
             
             # Default training features
             use_checkpointing=False,
