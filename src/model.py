@@ -31,6 +31,7 @@ class TransformerConfig:
         
         # Architecture Options
         prenorm: bool = True,
+        tie_embeddings: bool = True,
         
         # Training Features
         use_checkpointing: bool = False,
@@ -73,6 +74,7 @@ class TransformerConfig:
         
         # Architecture Options
         self.prenorm = prenorm
+        self.tie_embeddings = tie_embeddings
         
         # Training Features
         self.use_checkpointing = use_checkpointing
@@ -114,6 +116,7 @@ class TransformerConfig:
             
             # Architecture Options
             prenorm=True,
+            tie_embeddings=True,
             
             # Default training features
             use_checkpointing=False,
