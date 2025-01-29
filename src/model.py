@@ -229,54 +229,36 @@ class SparseMultiHeadAttention(nn.Module):
         """
         Perform scaled dot-product attention with support for sparse local window masking 
         and optional additive attention masking.
-
-
-    Args:
-        Q (torch.Tensor): Query tensor of shape (batch_size, num_heads, seq_len, head_dim).
-        K (torch.Tensor): Key tensor of shape (batch_size, num_heads, seq_len, head_dim).
-        V (torch.Tensor): Value tensor of shape (batch_size, num_heads, seq_len, head_dim).
-        local_mask (torch.Tensor): Local window mask tensor of shape (seq_len, seq_len).
-                                   Indicates positions to mask out based on a local window.
-        attn_mask (Optional[torch.Tensor]): Additive attention mask of shape 
-                                            (batch_size, seq_len) or 
-                                            (batch_size, seq_len, seq_len).
-                                            Used to mask certain tokens or positions 
-                                            in the attention computation.
-        
-        Returns:
-        Tuple[torch.Tensor, torch.Tensor]:
-            - output (torch.Tensor): The resulting tensor after applying attention,
-              of shape (batch_size, num_heads, seq_len, head_dim).
-            - scores (torch.Tensor): The normalized attention scores of shape 
-              (batch_size, num_heads, seq_len, seq_len).
-        
-        Notes:
-        - This function uses scaled dot-product attention.
-        - Handles broadcasting and alignment of attention masks to match `Q`, `K`, and `V`.
-        - Supports masking out-of-window positions using `local_mask` and
-          masking specific tokens or positions using `attn_mask`.
-          
         """
-        print(f"Q shape: {Q.shape}, K shape: {K.shape}, V shape: {V.shape}, attn_mask shape: {attn_mask.shape}")
         batch_size, num_heads, seq_len, _ = Q.size()
-        local_mask = local_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, num_heads, seq_len, seq_len)  # (1, 1, seq_len, seq_len)
-
-        if attn_mask is not None:
-            attn_mask = attn_mask[:, None, None, :].expand(batch_size, num_heads, seq_len, seq_len)
         
-        #Calculate attention scores
+        # Ensure local_mask is on the correct device and expand
+        local_mask = local_mask.to(Q.device)
+        local_mask = local_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, num_heads, seq_len, seq_len)
+
+        # Ensure attention mask is on the correct device and reshape
+        if attn_mask is not None:
+            attn_mask = attn_mask.to(Q.device)
+            # Reshape from [batch_size, seq_len] to [batch_size, 1, 1, seq_len]
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
+            # Expand to [batch_size, num_heads, seq_len, seq_len]
+            attn_mask = attn_mask.expand(batch_size, num_heads, seq_len, seq_len)
+            # Convert boolean/mask values to -inf/0
+            attn_mask = attn_mask.masked_fill(attn_mask == 0, float('-inf'))
+        
+        # Calculate attention scores
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
         if attn_mask is not None:
-            scores += attn_mask
+            scores = scores + attn_mask
         scores = scores + local_mask
         scores = scores.softmax(dim=-1)
 
-        #Compute final attn output
+        # Compute final attn output
         output = torch.matmul(scores, V)
 
         return output, scores
-
 
     def forward(
         self, 
@@ -288,60 +270,59 @@ class SparseMultiHeadAttention(nn.Module):
         use_cache=False
     ):
         """
-        q, k, v: (batch_size, seq_len, d_model)
-        attn_mask: e.g. (batch_size, 1, seq_len, seq_len), or broadcastable
-        past_key_value: (past_k, past_v) each with shape:
-                        (batch_size, num_heads, past_seq_len, d_k)
-        use_cache: If True, will store/return new (k, v).
-
-        Returns:
-            output: (batch_size, seq_len, d_model)
-            next_key_value: Optional[Tuple[Tensor, Tensor]]
+        Forward pass ensuring all tensors are on CUDA.
         """
+        # Move input tensors to CUDA if they aren't already
+        device = q.device
+        q = q.to(device)
+        k = k.to(device)
+        v = v.to(device)
+        if attn_mask is not None:
+            attn_mask = attn_mask.to(device)
+        
         batch_size, seq_len, _ = q.size()
         
-        # 1) Project Q, K, V
+        # Project and ensure on CUDA
         Q = self.w_q(q)
         K_ = self.w_k(k)
         V_ = self.w_v(v)
 
-        # 2) Reshape
+        # Reshape
         Q = Q.view(batch_size, seq_len, self.config.num_heads, self.d_k).transpose(1, 2)
         K_ = K_.view(batch_size, seq_len, self.config.num_heads, self.d_k).transpose(1, 2)
         V_ = V_.view(batch_size, seq_len, self.config.num_heads, self.d_k).transpose(1, 2)
 
-        # 3) If caching, concatenate new K/V with past K/V
+        # Handle past key/values
         if past_key_value is not None:
-            (past_k, past_v) = past_key_value
-            # K_ and V_ might correspond to only the "new" tokens
-            K_ = torch.cat([past_k, K_], dim=2)  # seq_len dimension
+            past_k, past_v = past_key_value
+            past_k = past_k.to(device)
+            past_v = past_v.to(device)
+            K_ = torch.cat([past_k, K_], dim=2)
             V_ = torch.cat([past_v, V_], dim=2)
         
         next_key_value = None
         if use_cache:
-            # We'll return the entire K_, V_ for next step
             next_key_value = (K_, V_)
 
-        # 4) Build or reuse local window mask
-        # The effective sequence length is K_.size(2)
+        # Create local mask on the correct device
         full_seq_len = K_.size(2)
-        local_mask = build_local_window_mask(full_seq_len, self.config.window_size, self.config.global_tokens)
+        local_mask = build_local_window_mask(
+            full_seq_len, 
+            self.config.window_size, 
+            self.config.global_tokens,
+            device=device
+        )
 
-        # 5) Compute attention
-        # We'll define a function for checkpoint if needed
+        # Rest of forward pass
         def fn_attention(Q_, K__, V__):
             return self.attn_function(Q_, K__, V__, local_mask, attn_mask)
         
         if self.config.use_checkpointing and Q.requires_grad:
-            # For memory efficiency, checkpoint the attention function
             output = checkpoint(fn_attention, Q, K_, V_)
         else:
             output = fn_attention(Q, K_, V_)
 
-        # 6) Reshape back
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_model)
-
-        # 7) Final linear projection
         output = self.out_proj(output)
 
         return output, next_key_value
@@ -356,7 +337,7 @@ def build_local_window_mask(seq_len: int, window_size: int, global_tokens: int =
         seq_len: Length of sequence
         window_size: Size of local attention window
         global_tokens: Number of global tokens that can attend to all positions
-        device: Device to create tensor on (defaults to CPU)
+        device: Device to create tensor on
     """
     mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device=device)
     for i in range(seq_len):
