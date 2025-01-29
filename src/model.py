@@ -4,106 +4,72 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import transformers
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple, Union
 
 """This code belongs to EllanorAI and is licensed under the EllanorAI Proprietary License."""
 
-class TransformerConfig:
-    """
-    Configuration class for the Transformer model with sparse attention.
-    Includes parameter validation and type hints for better usability.
-    """
-    def __init__(
-        self,
-        d_model: int = 160,  # Can be larger now with smaller vocab
-        num_heads: int = 8,  # Works well with d_model
-        window_size: int = 4,
-        global_tokens: int = 0,
-        d_ff: int = 640,  # 4x d_model
-        num_layers: int = 4,
-        dropout: float = 0.1,
-        max_seq_len: int = 1024,
-        activation: str = "relu",
-        use_rope: bool = True,
-        prenorm: bool = True,
-        vocab_size: int = 6000,  # Optimized vocab size
-        tie_embeddings: bool = True,
-        scheduler_type: str = "cosine",
-        learning_rate: float = 1e-4,
-        weight_decay: float = 0.0,
-        warmup_ratio: float = 0.1,
-        use_mixed_precision: bool = True,
-        max_grad_norm: float = 0.0,
-        pad_token_id: int = 0,
-        l2_reg: float = 0.0,
-        use_checkpointing: bool = False
-    ):
-        # Input validation
-        if d_model % num_heads != 0:
-            raise ValueError("d_model must be divisible by num_heads.")
-        if dropout < 0.0 or dropout > 1.0:
-            raise ValueError("dropout must be between 0 and 1.")
-        if vocab_size <= 0:
-            raise ValueError("vocab_size must be a positive integer.")
-        if num_layers <= 0:
-            raise ValueError("num_layers must be a positive integer.")
-        if window_size <= 0:
-            raise ValueError("window_size must be a positive integer.")
-        if max_seq_len <= 0:
-            raise ValueError("max_seq_len must be a positive integer.")
-        if activation not in ["relu", "gelu", "silu"]:
-            raise ValueError("activation must be one of ['relu', 'gelu', 'silu'].")
-
-        # Assign attributes
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.window_size = window_size
-        self.global_tokens = global_tokens
-        self.d_ff = d_ff
-        self.num_layers = num_layers
-        self.dropout = dropout
+###############################################################################
+# Core Components - Positional Encodings
+###############################################################################
+class RotaryPositionalEmbedding(nn.Module):
+    """Rotary positional embedding for enhanced position encoding."""
+    def __init__(self, dim: int, max_seq_len: int = 4096):
+        super().__init__()
+        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
         self.max_seq_len = max_seq_len
-        self.activation = activation
-        self.use_rope = use_rope
-        self.prenorm = prenorm
-        self.vocab_size = vocab_size
-        self.tie_embeddings = tie_embeddings
-        self.scheduler_type = scheduler_type
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
-        self.warmup_ratio = warmup_ratio
-        self.use_mixed_precision = use_mixed_precision
-        self.max_grad_norm = max_grad_norm
-        self.pad_token_id = pad_token_id
-        self.l2_reg = l2_reg
-        self.use_checkpointing = use_checkpointing
+        self.seq_len_cached = -1
+        self.cos_cached = None
+        self.sin_cached = None
 
-    def __repr__(self) -> str:
+    def forward(self, x: torch.Tensor, seq_len: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        String representation of the TransformerConfig for debugging and logging.
+        Compute rotary position embeddings.
+        
+        Args:
+            x: Input tensor to get device information
+            seq_len: Sequence length for position embeddings
+            
+        Returns:
+            Tuple of (cos, sin) tensors for rotary embeddings
         """
-        return (
-            f"TransformerConfig("
-            f"d_model={self.d_model}, num_heads={self.num_heads}, window_size={self.window_size}, "
-            f"global_tokens={self.global_tokens}, d_ff={self.d_ff}, num_layers={self.num_layers}, "
-            f"dropout={self.dropout}, max_seq_len={self.max_seq_len}, activation={self.activation}, "
-            f"use_rope={self.use_rope}, prenorm={self.prenorm}, vocab_size={self.vocab_size}"
-            f")"
-        )
+        if seq_len > self.seq_len_cached:
+            self.seq_len_cached = seq_len
+            t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
+            freqs = torch.einsum('i,j->ij', t, self.inv_freq)
+            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+            self.cos_cached = emb.cos()[None, None, :, :]
+            self.sin_cached = emb.sin()[None, None, :, :]
+        return self.cos_cached[:, :, :seq_len, :], self.sin_cached[:, :, :seq_len, :]
 
-###############################################################################
-# Local Window Mask with Optional Global Tokens
-###############################################################################
-def build_local_window_mask(seq_len: int, window_size: int, global_tokens: int = 0) -> torch.Tensor:
-    mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device='cuda')  # Add device
-    for i in range(seq_len):
-        for j in range(seq_len):
-            if i < global_tokens or j < global_tokens:
-                continue
-            if abs(i - j) > window_size:
-                mask[i, j] = float('-inf')
-    return mask
+class PositionalEncoding(nn.Module):
+    """Standard sinusoidal positional encoding."""
+    def __init__(self, d_model: int, max_len: int = 4096, dropout: float = 0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * 
+                           (-math.log(10000.0) / d_model))
+        
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Add positional encoding to input tensor.
+        
+        Args:
+            x: Input tensor (batch_size, seq_len, d_model)
+            
+        Returns:
+            Tensor with positional encoding added
+        """
+        seq_len = x.size(1)
+        return self.dropout(x + self.pe[:, :seq_len])
 
 ###############################################################################
 # Sparse Multi-Head Attention with Optional KV Caching
@@ -265,6 +231,27 @@ class SparseMultiHeadAttention(nn.Module):
         return output, next_key_value
 
 ###############################################################################
+# Local Window Mask with Optional Global Tokens
+###############################################################################
+def build_local_window_mask(seq_len: int, window_size: int, global_tokens: int = 0, device: Optional[torch.device] = None) -> torch.Tensor:
+    """Build local window mask for attention.
+    
+    Args:
+        seq_len: Length of sequence
+        window_size: Size of local attention window
+        global_tokens: Number of global tokens that can attend to all positions
+        device: Device to create tensor on (defaults to CPU)
+    """
+    mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device=device)
+    for i in range(seq_len):
+        for j in range(seq_len):
+            if i < global_tokens or j < global_tokens:
+                continue
+            if abs(i - j) > window_size:
+                mask[i, j] = float('-inf')
+    return mask
+
+###############################################################################
 # Residual + LayerNorm with Optional Gradient Checkpointing
 ###############################################################################
 class ResidualConnection(nn.Module):
@@ -367,42 +354,31 @@ class EncoderBlock(nn.Module):
 # Decoder Block with Sparse Self-Attn + Cross-Attn + Checkpointing + Cache
 ###############################################################################
 class DecoderBlock(nn.Module):
-    def __init__(
-        self, 
-        d_model, 
-        num_heads, 
-        window_size, 
-        global_tokens=0, 
-        d_ff=2048, 
-        dropout=0.1, 
-        use_checkpointing=False
-    ):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
         # 1) Decoder self-attention
-        self.self_attn_res = ResidualConnection(d_model, dropout, use_checkpointing)
-        self.self_attn = SparseMultiHeadAttention(
-            d_model=d_model,
-            num_heads=num_heads,
-            window_size=window_size,
-            global_tokens=global_tokens,
-            dropout=dropout,
-            use_checkpointing=use_checkpointing
+        self.self_attn_res = ResidualConnection(
+            config.d_model, 
+            config.dropout, 
+            config.use_checkpointing
         )
+        self.self_attn = SparseMultiHeadAttention(config, is_causal=True)
 
         # 2) Cross-attention
-        self.cross_attn_res = ResidualConnection(d_model, dropout, use_checkpointing)
-        self.cross_attn = SparseMultiHeadAttention(
-            d_model=d_model,
-            num_heads=num_heads,
-            window_size=window_size,
-            global_tokens=global_tokens,
-            dropout=dropout,
-            use_checkpointing=use_checkpointing
+        self.cross_attn_res = ResidualConnection(
+            config.d_model, 
+            config.dropout, 
+            config.use_checkpointing
         )
+        self.cross_attn = SparseMultiHeadAttention(config)
 
         # 3) Feed-forward
-        self.ff_res = ResidualConnection(d_model, dropout, use_checkpointing)
-        self.feed_forward = FeedForward(d_model, d_ff, dropout)
+        self.ff_res = ResidualConnection(
+            config.d_model, 
+            config.dropout, 
+            config.use_checkpointing
+        )
+        self.feed_forward = FeedForward(config)
 
     def forward(
         self, 
@@ -559,35 +535,84 @@ class Decoder(nn.Module):
         return x, next_past_key_values if use_cache else None
 
 ###############################################################################
-# Positional Encoding
-###############################################################################
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=4096, dropout=0.1):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * 
-                             (-math.log(10000.0) / d_model))
-        
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        
-        pe = pe.unsqueeze(0)  # shape: (1, max_len, d_model)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        """
-        x: (batch_size, seq_len, d_model)
-        """
-        seq_len = x.size(1)
-        x = x + self.pe[:, :seq_len, :].to(x.device)
-        return self.dropout(x)
-
-###############################################################################
 # Full Encoder–Decoder Transformer with Advanced Training Features
 ###############################################################################
+class TransformerConfig:
+    def __init__(
+        self,
+        # Model Architecture
+        vocab_size: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        dropout: float,
+        
+        # Attention Mechanisms
+        use_rope: bool,
+        window_size: int,
+        global_tokens: int,
+        
+        # Training Features
+        use_checkpointing: bool = False,
+        use_regularization: bool = False,
+        use_mixed_precision: bool = False,
+        label_smoothing: float = 0.0,
+        l2_reg: float = 0.0,
+        max_grad_norm: float = 1.0,
+        
+        # Optimization
+        learning_rate: float = 1e-4,
+        weight_decay: float = 0.01,
+        warmup_ratio: float = 0.1,
+        scheduler_type: str = "linear_warmup",
+        
+        # Special Tokens
+        pad_token_id: int = 0,
+        
+        # Model Behavior
+        activation: str = "gelu"  # Options: "gelu", "relu", "silu"
+    ):
+        """Initialize transformer configuration with validation."""
+        # Validate core architecture parameters
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        assert activation in ["gelu", "relu", "silu"], f"Unsupported activation: {activation}"
+        
+        # Model Architecture
+        self.vocab_size = vocab_size
+        self.d_model = d_model
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.max_seq_len = max_seq_len
+        self.dropout = dropout
+        
+        # Attention Mechanisms
+        self.use_rope = use_rope
+        self.window_size = window_size
+        self.global_tokens = global_tokens
+        
+        # Training Features
+        self.use_checkpointing = use_checkpointing
+        self.use_regularization = use_regularization
+        self.use_mixed_precision = use_mixed_precision
+        self.label_smoothing = label_smoothing
+        self.l2_reg = l2_reg
+        self.max_grad_norm = max_grad_norm
+        
+        # Optimization
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.warmup_ratio = warmup_ratio
+        self.scheduler_type = scheduler_type
+        
+        # Special Tokens
+        self.pad_token_id = pad_token_id
+        
+        # Model Behavior
+        self.activation = activation
+
 class Transformer(nn.Module):
     def __init__(
         self,
@@ -630,20 +655,40 @@ class Transformer(nn.Module):
         self,
         src: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[tuple] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
         use_cache: bool = False
-    ):
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]]:
+        """
+        Forward pass of the transformer.
+        
+        Args:
+            src: Input tensor of shape (batch_size, seq_len)
+            attention_mask: Optional attention mask
+            past_key_values: Optional cached key/value states for each layer
+            use_cache: Whether to return cached key/value states
+            
+        Returns:
+            If use_cache=False: output logits
+            If use_cache=True: tuple of (output logits, list of cached key/value states)
+        """
         # Embedding + positional encoding
         x = self.embedding(src)
         if not self.config.use_rope:
             x = self.pos_encoding(x)
             
         # Encoder
-        encoder_output = self.encoder(x, attention_mask)
+        encoder_output, next_cache = self.encoder(
+            x, 
+            attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache
+        )
         
         # Generate output
         output = self.generator(encoder_output)
         
+        if use_cache:
+            return output, next_cache
         return output
 
     def configure_optimizer(self, config: TransformerConfig):
@@ -756,6 +801,30 @@ class Transformer(nn.Module):
         
         return metrics
 
+    def compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Compute cross entropy loss with optional label smoothing.
+        
+        Args:
+            outputs: Model output logits (batch_size, seq_len, vocab_size)
+            labels: Target labels (batch_size, seq_len)
+            
+        Returns:
+            Loss tensor
+        """
+        if self.config.label_smoothing > 0:
+            return F.cross_entropy(
+                outputs.view(-1, outputs.size(-1)),
+                labels.view(-1),
+                ignore_index=self.config.pad_token_id,
+                label_smoothing=self.config.label_smoothing
+            )
+        else:
+            return F.cross_entropy(
+                outputs.view(-1, outputs.size(-1)),
+                labels.view(-1),
+                ignore_index=self.config.pad_token_id
+            )
+
     @staticmethod
     def get_scheduler(optimizer, config: TransformerConfig, num_training_steps: int):
         """Enhanced learning rate scheduler with warmup"""
@@ -773,26 +842,3 @@ class Transformer(nn.Module):
                 num_warmup_steps=num_warmup_steps,
                 num_training_steps=num_training_steps
             )
-
-###############################################################################
-# Rotary Positional Embedding
-###############################################################################
-class RotaryPositionalEmbedding(nn.Module):
-    def __init__(self, dim, max_seq_len=4096):
-        super().__init__()
-        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
-        self.max_seq_len = max_seq_len
-        self.seq_len_cached = -1
-        self.cos_cached = None
-        self.sin_cached = None
-
-    def forward(self, x, seq_len=None):
-        if seq_len > self.seq_len_cached:
-            self.seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
-            freqs = torch.einsum('i,j->ij', t, self.inv_freq)
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            self.cos_cached = emb.cos()[None, None, :, :]
-            self.sin_cached = emb.sin()[None, None, :, :]
-        return self.cos_cached[:, :, :seq_len, :], self.sin_cached[:, :, :seq_len, :]
