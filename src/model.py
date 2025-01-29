@@ -8,9 +8,10 @@ from typing import Dict, Optional, List, Tuple, Union
 
 """This code belongs to EllanorAI and is licensed under the EllanorAI Proprietary License."""
 
-###############################################################################
-# Transformer Configuration
-###############################################################################
+########################################################################################
+#TransformerConfig
+########################################################################################
+
 class TransformerConfig:
     def __init__(
         self,
@@ -616,6 +617,7 @@ class Decoder(nn.Module):
 ###############################################################################
 # Full Encoder–Decoder Transformer with Advanced Training Features
 ###############################################################################
+
 class Transformer(nn.Module):
     def __init__(
         self,
