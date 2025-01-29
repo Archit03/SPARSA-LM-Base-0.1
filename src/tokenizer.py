@@ -60,13 +60,13 @@ class Config:
         vocab_size: Optional[int] = None,
         min_frequency: int = 2,
         log_file: str = "tokenizer.log",
-        chunk_size: int = 1000,
-        max_workers: Optional[int] = 4,
+        chunk_size: int = 10000,
+        max_workers: Optional[int] = None,
         memory_threshold: float = 0.8,
         cache_dir: str = ".cache",
         allowed_extensions: Set[str] = {'.txt', '.json', '.jsonl', '.csv'},
         allowed_mimetypes: Set[str] = {'text/plain', 'application/json', 'text/csv'},
-        max_file_size: int = 10000 * 1024 * 1024,  
+        max_file_size: int = 100 * 1024 * 1024,  # 100MB
         gpu_memory_threshold: float = 0.8
     ):
         self.local_data_path = local_data_path
@@ -554,7 +554,7 @@ class MedicalTokenizer:
     
     def __init__(
         self,
-        vocab_size: Optional[int] = 10000,
+        vocab_size: Optional[int] = 60000,
         min_frequency: int = 2,
         padding_strategy: str = 'longest',
         truncation_strategy: str = 'longest_first',
@@ -595,27 +595,7 @@ class MedicalTokenizer:
             'sep_token': "[SEP]",
             'mask_token': "[MASK]",
             'bos_token': "[BOS]",
-            'eos_token': "[EOS]", 
-
-            "number_token": "[NUM]",
-            "decimal_token": "[DEC]",
-            "negative_token": "[NEG]",
-            
-            # Math operation tokens
-            "add_token": "[ADD]",
-            "subtract_token": "[SUB]",
-            "multiply_token": "[MUL]",
-            "divide_token": "[DIV]",
-            "equals_token": "[EQ]",
-            "greater_token": "[GT]",
-            "less_token": "[LT]",
-            "parenthesis_open_token": "[LPAR]",
-            "parenthesis_close_token": "[RPAR]",
-            "exponent_token": "[EXP]",
-            "sqrt_token": "[SQRT]",
-            "sum_token": "[SUM]",
-            "integral_token": "[INT]",
-            "infinity_token": "[INF]"
+            'eos_token': "[EOS]"
         }
         
         # Normalization configuration
@@ -682,7 +662,7 @@ class MedicalTokenizer:
 
     def _calculate_dynamic_vocab_size(self) -> int:
         """Calculate vocabulary size."""
-        return 10000  # Fixed vocabulary size
+        return 60000  # Fixed vocabulary size
 
     def _analyze_dataset_vocabulary(self) -> int:
         """Analyze dataset to count unique tokens."""
@@ -860,7 +840,7 @@ class DatasetProcessor:
         estimated_item_size = 1024  
         
         # Use 80% of available memory for batch processing (increased from 20%)
-        target_memory = available_memory * 0.9
+        target_memory = available_memory * 0.8
         optimal_size = int(target_memory / estimated_item_size)
         
         # Increased upper bound to allow larger batches
@@ -1500,8 +1480,8 @@ class ChunkManager:
     def get_chunk_size(self) -> int:
         """Calculate optimal chunk size based on available memory"""
         available_memory = psutil.virtual_memory().available
-        # Use 10% of available memory (increased from previous value)
-        return max(self.min_chunk_size, int(available_memory * 0.1 / 8192))
+        # Use 80% of available memory (increased from previous value)
+        return max(self.min_chunk_size, int(available_memory * 0.8 / 8192))
 
 class AsyncFileProcessor:
     """Enhanced asynchronous file operations handler"""
@@ -1795,40 +1775,33 @@ def process_local_file(file_path: Path) -> Optional[str]:
         logging.error(f"Error processing file {file_path}: {str(e)}")
         return None
 
-def load_local_dataset(config: Dict[str, Any]) -> Iterator[str]:
-    """Load local dataset as a generator to avoid memory issues"""
-    path = Path(config.get('path', ''))
-    if not path.exists() or not path.is_dir():
-        logging.error(f"Invalid dataset path: {path}")
-        return
-
-    pattern = config.get('pattern', '*.txt')
+def load_local_dataset(config: dict) -> List[str]:
+    """Load local dataset with proper pattern handling."""
+    path = Path(config['path'])
+    patterns = config.get('patterns', ['*.txt'])
+    if isinstance(patterns, str):
+        patterns = [patterns]
     
-    def text_generator():
-        for file_path in path.glob(pattern):
-            try:
-                # Check file size before processing
-                if file_path.stat().st_size > 100 * 1024 * 1024:  # Skip files larger than 100MB
-                    logging.warning(f"Skipping large file: {file_path}")
-                    continue
-                    
-                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                    # Read file line by line
-                    for line in f:
-                        line = line.strip()
-                        if line:  # Only yield non-empty lines
-                            yield line
-                            
-                # Clear memory after each file
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    
-            except Exception as e:
-                logging.error(f"Error processing file {file_path}: {str(e)}")
-                continue
+    files = []
+    for pattern in patterns:
+        # Use glob instead of rglob for pattern matching
+        if '**' in pattern:
+            files.extend(path.glob(pattern))
+        else:
+            files.extend(path.glob(pattern))
     
-    return text_generator()
+    if not files:
+        logging.warning(f"No files found in {path} matching patterns: {patterns}")
+        return []
+    
+    processed_texts = []
+    with tqdm(total=len(files), desc="Processing local files") as pbar:
+        for file in files:
+            if text := process_local_file(file):
+                processed_texts.append(text)
+            pbar.update(1)
+    
+    return processed_texts
 
 def load_dataset_from_config(config: dict) -> Optional[Any]:
     """Load a dataset based on configuration."""
@@ -1895,44 +1868,31 @@ def load_dataset_from_config(config: dict) -> Optional[Any]:
         return None
 
 def process_streaming_dataset(dataset: Any, output_path: Path, chunk_size: int, dataset_name: str) -> Optional[str]:
-    """Process streaming dataset with memory-efficient handling"""
+    """Process streaming dataset with immediate processing."""
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        batch_processor = BatchProcessor()
-        buffer: List[str] = []
-        total_processed = 0
-
-        with open(output_path, 'w', encoding='utf-8', buffering=8*1024*1024) as f:  # 8MB buffer
-            with tqdm(desc=f"Processing {dataset_name}", unit=" samples") as pbar:
+        buffer_size = 1024 * 1024 * 8  # 8MB buffer
+        
+        total = len(dataset) if hasattr(dataset, '__len__') else None
+        
+        with open(output_path, 'w', encoding='utf-8', buffering=buffer_size) as f:
+            with tqdm(total=total, desc=f"Processing {dataset_name}", unit=" samples") as pbar:
                 for item in dataset:
                     if isinstance(item, dict):
                         text = item.get('text', '')
                     else:
                         text = str(item)
-
+                        
                     if text:
-                        buffer.append(text)
-                        if len(buffer) >= chunk_size:
-                            batch_processor.process_batch(buffer)
-                            f.write('\n'.join(buffer) + '\n')
-                            total_processed += len(buffer)
-                            pbar.update(len(buffer))
-                            buffer.clear()
-                            
-                            # Force garbage collection if memory usage is high
-                            if psutil.virtual_memory().percent > 80:
-                                gc.collect()
-
-                # Process remaining items
-                if buffer:
-                    batch_processor.process_batch(buffer)
-                    f.write('\n'.join(buffer) + '\n')
-                    total_processed += len(buffer)
-                    pbar.update(len(buffer))
-
-        batch_processor.wait_completion()
+                        f.write(text + '\n')
+                        pbar.update(1)
+                        
+                        # Update rate every 100 samples
+                        if pbar.n % 100 == 0:
+                            pbar.set_postfix({'rate': f'{pbar.n/pbar.elapsed:.1f} samples/s'})
+        
         return str(output_path)
-
+            
     except Exception as e:
         logging.error(f"Error processing dataset {dataset_name}: {str(e)}")
         return None
@@ -2011,75 +1971,18 @@ def parse_args():
     return parser.parse_args()
 
 def train_tokenizer(texts: List[str], args: argparse.Namespace) -> Tokenizer:
-    """Train a tokenizer using temporary file storage with single text processing"""
-    try:
-        # Initialize tokenizer
-        tokenizer = Tokenizer(BPE())
-        tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
-
-        # Create temporary directory for storing text chunks
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_dir = Path(temp_dir)
-            chunk_files = []
-            current_file = None
-            current_size = 0
-            max_file_size = 10 * 1024 * 1024  # 10MB per file
-            
-            # Process texts one at a time
-            for i, text in enumerate(texts):
-                if not isinstance(text, str) or not text.strip():
-                    continue
-                    
-                # Create new file if needed
-                if current_file is None or current_size >= max_file_size:
-                    if current_file is not None:
-                        current_file.close()
-                    current_file = open(temp_dir / f"chunk_{len(chunk_files)}.txt", 'w', encoding='utf-8')
-                    chunk_files.append(current_file.name)
-                    current_size = 0
-                
-                # Write single text with newline
-                try:
-                    current_file.write(text + '\n')
-                    current_size += len(text.encode('utf-8')) + 1
-                except Exception as e:
-                    logging.warning(f"Failed to write text at index {i}: {str(e)}")
-                    continue
-                
-                # Periodic cleanup
-                if i % 1000 == 0:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-            # Close last file
-            if current_file is not None:
-                current_file.close()
-
-            # Clear main texts list from memory
-            texts.clear()
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            # Train tokenizer on files
-            trainer = BpeTrainer(
-                vocab_size=args.vocab_size,
-                min_frequency=args.min_frequency,
-                special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"],
-                show_progress=True
-            )
-
-            logging.info(f"Training tokenizer on {len(chunk_files)} files")
-            tokenizer.train(files=chunk_files, trainer=trainer)
-
-        return tokenizer
-
-    except Exception as e:
-        logging.error(f"Error during tokenizer training: {str(e)}")
-        raise
+    """Train a tokenizer on the given texts"""
+    special_tokens = args.special_tokens if hasattr(args, 'special_tokens') else []
+    trainer = BpeTrainer(
+        vocab_size=args.vocab_size,
+        min_frequency=args.min_frequency,
+        special_tokens=special_tokens
+    )
+    trainer.train_from_iterator(texts, length=len(texts))
+    return trainer.tokenizer
 
 def main():
+    """Main function for tokenizer training"""
     try:
         args = parse_args()
         
@@ -2099,95 +2002,50 @@ def main():
             
         if not validate_dataset_config(dataset_config):
             raise ValueError("Invalid dataset configuration")
+            
+        # Start tokenizer training process
+        print("Starting tokenizer training...")
+        datasets = load_datasets(dataset_config, args.cache_dir)
         
-        # Create temporary directory for storing processed texts
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_dir = Path(temp_dir)
-            chunk_files = []
-            current_file = None
-            current_size = 0
-            max_file_size = 10 * 1024 * 1024  # 10MB per file
-            total_texts = 0
+        # Initialize tokenizer trainer
+        trainer = TokenizerTrainer(
+            vocab_size=args.vocab_size,
+            min_frequency=args.min_frequency
+        )
+        
+        # Process datasets
+        texts = []
+        for dataset_name, dataset in datasets['datasets'].items():
+            logging.info(f"Processing dataset: {dataset_name}")
             
-            # Process each dataset
-            for dataset_config in dataset_config['datasets']:
-                dataset_name = dataset_config['name']
-                logging.info(f"Processing dataset: {dataset_name}")
-                
-                try:
-                    # Get text iterator based on dataset type
-                    if dataset_config['type'] == 'local':
-                        text_iterator = load_local_dataset(dataset_config['config'])
-                    else:  # huggingface
-                        dataset = load_dataset_from_config(dataset_config['config'])
-                        text_iterator = (text for text in dataset if isinstance(text, str) and text.strip())
-                    
-                    # Process texts one at a time
-                    for text in text_iterator:
-                        # Create new file if needed
-                        if current_file is None or current_size >= max_file_size:
-                            if current_file is not None:
-                                current_file.close()
-                            current_file = open(temp_dir / f"chunk_{len(chunk_files)}.txt", 'w', encoding='utf-8')
-                            chunk_files.append(current_file.name)
-                            current_size = 0
-                        
-                        # Write single text with newline
-                        try:
-                            current_file.write(text + '\n')
-                            current_size += len(text.encode('utf-8')) + 1
-                            total_texts += 1
-                            
-                            # Periodic cleanup and progress update
-                            if total_texts % 1000 == 0:
-                                logging.info(f"Processed {total_texts} texts")
-                                gc.collect()
-                                if torch.cuda.is_available():
-                                    torch.cuda.empty_cache()
-                                
-                        except Exception as e:
-                            logging.warning(f"Failed to write text: {str(e)}")
-                            continue
-                            
-                except Exception as e:
-                    logging.error(f"Error processing dataset {dataset_name}: {str(e)}")
-                    continue
-            
-            # Close last file
-            if current_file is not None:
-                current_file.close()
-            
-            if not chunk_files:
-                raise ValueError("No texts were successfully processed")
-            
-            logging.info(f"Total processed texts: {total_texts}")
-            
-            # Train tokenizer on files
-            tokenizer = Tokenizer(BPE())
-            tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
-            
-            trainer = BpeTrainer(
-                vocab_size=args.vocab_size,
-                min_frequency=args.min_frequency,
-                special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"],
-                show_progress=True
-            )
-            
-            logging.info(f"Training tokenizer on {len(chunk_files)} files")
-            tokenizer.train(files=chunk_files, trainer=trainer)
-            
-            # Save trained tokenizer
-            output_dir = Path('C:\\Users\\ASUS\\Desktop\\SPARSA-LM-Base 0.1\\data\\processed\\tokenizer')
-            output_dir.mkdir(exist_ok=True)
-            output_path = output_dir / "tokenizer.json"
-            
-            try:
-                tokenizer.save(str(output_path))
-                logging.info(f"Tokenizer saved to {output_path}")
-                print(f"Tokenizer training completed successfully. Saved to {output_path}")
-            except Exception as e:
-                logging.error(f"Error saving tokenizer: {str(e)}")
-                raise
+            # Handle different dataset types
+            if dataset_name == 'local':
+                # For local datasets, process each text directly
+                for text in dataset:
+                    if isinstance(text, str) and text.strip():
+                        trainer.add_texts(text)
+            else:
+                # For HuggingFace datasets, extract text from items
+                if isinstance(dataset, list):
+                    for item in dataset:
+                        if isinstance(item, dict):
+                            text = item.get('text', '')
+                            if text and isinstance(text, str):
+                                trainer.add_texts(text)
+                        elif isinstance(item, str):
+                            trainer.add_texts(item)
+        
+        # Train tokenizer
+        tokenizer = trainer.train()
+        
+        # Save trained tokenizer
+        output_dir = Path('C:\\Users\\ASUS\\Desktop\\SPARSA-LM-Base 0.1\\data\\processed\\tokenizer')
+        output_dir.mkdir(exist_ok=True)
+        output_path = output_dir / "tokenizer.json"
+        tokenizer.save(str(output_path))
+        
+        logging.info(f"Tokenizer saved to {output_path}")
+        print(f"Tokenizer training completed successfully. Saved to {output_path}")
         
     except Exception as e:
         logging.error(f"Error during tokenizer training: {str(e)}")
@@ -2351,67 +2209,43 @@ class DatasetLogger:
 
 # Add optimized batch processor
 class BatchProcessor:
-    """Efficient batch processing with memory-aware execution"""
+    """Efficient batch processing with parallel execution"""
     
-    def __init__(self, max_workers: Optional[int] = None, batch_size: Optional[int] = None):
-        self.max_workers = max_workers or min(16, multiprocessing.cpu_count())
-        self.batch_size = batch_size or self._calculate_optimal_batch_size()
-        self.executor = None
+    def __init__(self, max_workers: int = 16, batch_size: int = 10000):
+        self.max_workers = max_workers
+        self.batch_size = batch_size
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.pending_futures = []
-        self.memory_monitor = MemoryManager()
-
-    def _calculate_optimal_batch_size(self) -> int:
-        """Calculate optimal batch size based on available memory"""
-        available_memory = psutil.virtual_memory().available
-        # Estimate 1KB per text item
-        estimated_item_size = 1024
-        # Use 20% of available memory
-        target_memory = available_memory * 0.2
-        return max(1000, min(int(target_memory / estimated_item_size), 50000))
-
+        
     def process_batch(self, batch: List[str]) -> None:
-        """Process a batch of texts with memory monitoring"""
-        if self.memory_monitor.check_memory()[0]:
-            # If memory usage is high, process synchronously
-            self._process_batch(batch)
-            return
-
-        if self.executor is None:
-            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
-
-        # Split batch if it's too large
-        for sub_batch in self._split_batch(batch):
-            future = self.executor.submit(self._process_batch, sub_batch)
-            self.pending_futures.append(future)
-            self._cleanup_completed_futures()
-
-    def _split_batch(self, batch: List[str]) -> Generator[List[str], None, None]:
-        """Split large batches into smaller chunks"""
-        for i in range(0, len(batch), self.batch_size):
-            yield batch[i:i + self.batch_size]
-
-    def _cleanup_completed_futures(self) -> None:
-        """Clean up completed futures and handle any errors"""
+        """Process a batch of texts in parallel"""
+        future = self.executor.submit(self._process_batch, batch)
+        self.pending_futures.append(future)
+        
+        # Clean up completed futures
         done_futures = [f for f in self.pending_futures if f.done()]
         for future in done_futures:
             self.pending_futures.remove(future)
+            # Check for exceptions
             try:
                 future.result()
             except Exception as e:
                 logging.error(f"Batch processing error: {str(e)}")
-
+    
+    def _process_batch(self, texts: List[str]) -> None:
+        """Process individual batch with optimized operations"""
+        try:
+            # Perform batch operations here
+            # This is where you'd add specific processing logic
+            pass
+        except Exception as e:
+            logging.error(f"Error processing batch: {str(e)}")
+            raise
+    
     def wait_completion(self) -> None:
         """Wait for all pending operations to complete"""
-        try:
-            if self.executor:
-                self.executor.shutdown(wait=True)
-                self.executor = None
-            self.pending_futures.clear()
-        except Exception as e:
-            logging.error(f"Error during completion: {str(e)}")
-        finally:
-            gc.collect()
-
-    def __del__(self):
-        """Ensure cleanup on deletion"""
-        self.wait_completion()
+        for future in self.pending_futures:
+            try:
+                future.result()
+            except Exception as e:
+                logging.error(f"Error in pending batch: {str(e)}")
