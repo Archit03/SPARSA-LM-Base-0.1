@@ -14,29 +14,29 @@ class TransformerConfig:
     Includes parameter validation and type hints for better usability.
     """
     def __init__(
-            self,
-            d_model: int = 256,  # Reduced to lower the model size
-            num_heads: int = 4,  # Adjusted to match d_model (d_model must be divisible by num_heads)
-            window_size: int = 4,
-            global_tokens: int = 0,
-            d_ff: int = 1024,  # Reduced to lower the model size
-            num_layers: int = 4,  # Fewer layers to fit the target parameter count
-            dropout: float = 0.1,
-            max_seq_len: int = 1024,  # Adjusted to suit a smaller model
-            activation: str = "relu",
-            use_rope: bool = True,
-            prenorm: bool = True,
-            vocab_size: int = 10000,  # Reduced vocabulary size
-            tie_embeddings: bool = False,
-            scheduler_type: str = "cosine",
-            learning_rate: float = 1e-4,
-            weight_decay: float = 0.0,
-            warmup_ratio: float = 0.1,
-            use_mixed_precision: bool = True,
-            max_grad_norm: float = 0.0,
-            pad_token_id: int = 0,
-            l2_reg: float = 0.0,
-            use_checkpointing: bool = False
+        self,
+        d_model: int = 160,  # Can be larger now with smaller vocab
+        num_heads: int = 8,  # Works well with d_model
+        window_size: int = 4,
+        global_tokens: int = 0,
+        d_ff: int = 640,  # 4x d_model
+        num_layers: int = 4,
+        dropout: float = 0.1,
+        max_seq_len: int = 1024,
+        activation: str = "relu",
+        use_rope: bool = True,
+        prenorm: bool = True,
+        vocab_size: int = 6000,  # Optimized vocab size
+        tie_embeddings: bool = True,
+        scheduler_type: str = "cosine",
+        learning_rate: float = 1e-4,
+        weight_decay: float = 0.0,
+        warmup_ratio: float = 0.1,
+        use_mixed_precision: bool = True,
+        max_grad_norm: float = 0.0,
+        pad_token_id: int = 0,
+        l2_reg: float = 0.0,
+        use_checkpointing: bool = False
     ):
         # Input validation
         if d_model % num_heads != 0:
