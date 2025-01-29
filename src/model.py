@@ -38,7 +38,7 @@ class TransformerConfig:
         max_grad_norm: float = 1.0,
         
         # Optimization
-        learning_rate: float = 1e-4,
+        learning_rate: float = 3e-4,
         weight_decay: float = 0.01,
         warmup_ratio: float = 0.1,
         scheduler_type: str = "linear_warmup",
@@ -87,6 +87,30 @@ class TransformerConfig:
         
         # Model Behavior
         self.activation = activation
+
+    @staticmethod
+    def get_2M_config():
+        """Returns config for ~2M parameter model with 6k vocab size"""
+        return TransformerConfig(
+            # Model Architecture
+            vocab_size=6000,
+            d_model=256,
+            num_layers=6,
+            num_heads=8,
+            d_ff=1024,
+            max_seq_len=2048,
+            dropout=0.1,
+            
+            # Attention Mechanisms
+            use_rope=True,
+            window_size=256,
+            global_tokens=8,
+            
+            # Default training features
+            use_checkpointing=False,
+            use_mixed_precision=True,
+            activation="gelu"
+        )
 
 ###############################################################################
 # Core Components - Positional Encodings
