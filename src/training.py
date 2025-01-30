@@ -27,6 +27,11 @@ class Trainer:
             # Assign configurations
             self.config = training_config
             self.data_config = data_config
+            
+            # Initialize early stopping variables
+            self.best_metric = float('inf')
+            self.stopping_counter = 0
+            self.early_stopping_patience = self.config['training'].get('early_stopping_patience', 3)
 
             # Setup logging
             self.logger = setup_logging(self.config['logging']['log_dir'], name='LuminaLM_trainer')
@@ -156,6 +161,12 @@ class Trainer:
             self.gradient_accumulation_steps = self.config['training']['gradient_accumulation_steps']
             self.scaler = GradScaler(enabled=self.config['training'].get('use_mixed_precision', True))
 
+            # Validate device configuration
+            if 'device' not in self.config['training']:
+                self.config['training']['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.device = self.config['training']['device']
+            self.logger.info(f"Using device: {self.device}")
+
         except Exception as e:
             raise RuntimeError(f"LuminaLM Initialization failed: {e}")
         
@@ -191,12 +202,13 @@ class Trainer:
         )
     
     def _validate_config(self, config: Dict):
+        """Validate configuration parameters."""
         required_keys = ['logging', 'training', 'tokenizer', 'datasets', 'model']
         for key in required_keys:
            if key not in config:
                 raise ConfigurationError(f"Missing required config key: {key}")
 
-    # Convert learning_rate to float if it's a string
+        # Convert learning_rate to float if it's a string
         if isinstance(config['training']['learning_rate'], str):
             try:
                 config['training']['learning_rate'] = float(config['training']['learning_rate'])
@@ -236,41 +248,41 @@ class Trainer:
         progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch + 1}")
 
         for step, batch in enumerate(progress_bar):
-            inputs = batch["input_ids"].to(self.config['training']['device'])
-            attention_mask = batch["attention_mask"].to(self.config['training']['device'])
-            labels = batch["labels"].to(self.config['training']['device'])
+            inputs = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            labels = batch["labels"].to(self.device)
 
             # Specify the device type for autocast
-            device_type = 'cuda' if self.config['training']['device'] == 'cuda' else 'cpu'
+            device_type = 'cuda' if self.device == 'cuda' else 'cpu'
 
-        with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
-            outputs = self.model(inputs, attention_mask=attention_mask)
-            loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
-            loss = loss / self.gradient_accumulation_steps
+            with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
+                outputs = self.model(inputs, attention_mask=attention_mask)
+                loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
+                loss = loss / self.gradient_accumulation_steps
 
-        total_loss += loss.item()
-        progress_bar.set_postfix(loss=loss.item())
+            total_loss += loss.item()
+            progress_bar.set_postfix(loss=loss.item())
 
-        # Backward pass
-        self.scaler.scale(loss).backward()
+            # Backward pass
+            self.scaler.scale(loss).backward()
 
-        # Gradient accumulation step
-        if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
-            self.scaler.unscale_(self.optimizer)
-            clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.scheduler.step()
-            self.optimizer.zero_grad()
+            # Gradient accumulation step
+            if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+                self.scaler.unscale_(self.optimizer)
+                clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.scheduler.step()
+                self.optimizer.zero_grad()
 
-        # Log to W&B
-        if self.use_wandb:
-            self._log_gradients_and_activations()
-            wandb.log({
-                "model": "LuminaLM",
-                "train_loss": loss.item(),
-                "lr": self.scheduler.get_last_lr()[0]
-            })
+            # Log to W&B
+            if self.use_wandb:
+                self._log_gradients_and_activations()
+                wandb.log({
+                    "model": "LuminaLM",
+                    "train_loss": loss.item(),
+                    "lr": self.scheduler.get_last_lr()[0]
+                })
 
         avg_loss = total_loss / len(self.train_loader)
         train_perplexity = self._calculate_perplexity(avg_loss)
@@ -285,12 +297,9 @@ class Trainer:
         progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
 
         for batch in progress_bar:
-            inputs, attention_mask, labels = batch
-            inputs, attention_mask, labels = (
-                inputs.to(self.config['training']['device']),
-                attention_mask.to(self.config['training']['device']),
-                labels.to(self.config['training']['device'])
-            )
+            inputs = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            labels = batch["labels"].to(self.device)
 
             outputs = self.model(inputs, attention_mask=attention_mask)
             loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
@@ -311,56 +320,64 @@ class Trainer:
         return avg_loss, val_perplexity
 
     def train(self):
-        best_val_loss = float('inf')
-        best_model_path = os.path.join(
-            self.config['training']['checkpoint_dir'], 
-            'best_LuminaLM_model.pt'
-        )
+        try:
+            best_val_loss = float('inf')
+            best_model_path = os.path.join(
+                self.config['training']['checkpoint_dir'], 
+                'best_LuminaLM_model.pt'
+            )
 
-        for epoch in range(self.start_epoch, self.config['training']['epochs']):
-            self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
-            train_loss, train_perplexity = self.train_one_epoch(epoch)
-            val_loss, val_perplexity = self.validate(epoch)
+            for epoch in range(self.start_epoch, self.config['training']['epochs']):
+                self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
+                train_loss, train_perplexity = self.train_one_epoch(epoch)
+                val_loss, val_perplexity = self.validate(epoch)
 
-            # Early stopping check
-            if self._early_stopping(val_loss):
-                self.logger.info(f"Early stopping triggered for LuminaLM at epoch {epoch}")
-                break
+                # Early stopping check
+                if self._early_stopping(val_loss):
+                    self.logger.info(f"Early stopping triggered for LuminaLM at epoch {epoch}")
+                    break
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save({
-                    'model_name': 'LuminaLM',
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
-                    'loss': best_val_loss
-                }, best_model_path)
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    torch.save({
+                        'model_name': 'LuminaLM',
+                        'epoch': epoch,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'scheduler_state_dict': self.scheduler.state_dict(),
+                        'loss': best_val_loss
+                    }, best_model_path)
 
-                save_checkpoint(
-                    self.config['training']['checkpoint_dir'],
-                    self.model,
-                    self.optimizer,
-                    self.scheduler,
-                    epoch,
-                    model_name='LuminaLM'
-                )
-                self.logger.info(f"Saved best LuminaLM model checkpoint at epoch {epoch + 1}")
+                    save_checkpoint(
+                        self.config['training']['checkpoint_dir'],
+                        self.model,
+                        self.optimizer,
+                        self.scheduler,
+                        epoch,
+                        model_name='LuminaLM'
+                    )
+                    self.logger.info(f"Saved best LuminaLM model checkpoint at epoch {epoch + 1}")
 
-            # Log to W&B
+                # Log to W&B
+                if self.use_wandb:
+                    wandb.log({
+                        "model": "LuminaLM",
+                        "epoch": epoch + 1,
+                        "train_loss": train_loss,
+                        "train_perplexity": train_perplexity,
+                        "val_loss": val_loss,
+                        "val_perplexity": val_perplexity
+                    })
+
+            self.logger.info("LuminaLM training completed.")
+            return best_model_path
+
+        finally:
+            # Cleanup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             if self.use_wandb:
-                wandb.log({
-                    "model": "LuminaLM",
-                    "epoch": epoch + 1,
-                    "train_loss": train_loss,
-                    "train_perplexity": train_perplexity,
-                    "val_loss": val_loss,
-                    "val_perplexity": val_perplexity
-                })
-
-        self.logger.info("LuminaLM training completed.")
-        return best_model_path
+                wandb.finish()
     
     
 def main():
@@ -373,14 +390,10 @@ def main():
         # Load training config
         with open(training_config_path, 'r') as f:
             training_config = yaml.safe_load(f)
-            print(f"Loaded data_config: {data_config_path}") # for debugging
-            print(f"Learning rate: {training_config['training']['learning_rate']}, Type: {type(training_config['training']['learning_rate'])}") # for debugging
 
         # Load data config
         with open(data_config_path, 'r') as f:
             data_config = yaml.safe_load(f)
-            print(f"Loaded data_config: {data_config_path} successfully.") # for debugging
-            print(f"data_config: {data_config}, Type: {type(data_config)}")
 
         # Ensure model directory exists
         model_dir = 'model'
@@ -394,7 +407,7 @@ def main():
 
         # Start training
         best_model_path = trainer.train()
-        print(f"Training completed. Best model saved at: {best_model_path}")
+        logging.info(f"Training completed. Best model saved at: {best_model_path}")
 
     except Exception as e:
         logging.error(f"Training failed: {e}")

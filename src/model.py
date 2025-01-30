@@ -51,7 +51,10 @@ class TransformerConfig:
         pad_token_id: int = 0,
         
         # Model Behavior
-        activation: str = "gelu"  # Options: "gelu", "relu", "silu"
+        activation: str = "gelu",  # Options: "gelu", "relu", "silu"
+        
+        # Device
+        device: Optional[torch.device] = None
     ):
         """Initialize transformer configuration with validation."""
         # Validate core architecture parameters
@@ -96,6 +99,15 @@ class TransformerConfig:
         # Model Behavior
         self.activation = activation
 
+        # Validate window size
+        assert window_size > 0, "Window size must be positive"
+        assert window_size <= max_seq_len, "Window size cannot exceed max sequence length"
+        assert global_tokens >= 0, "Number of global tokens cannot be negative"
+        assert global_tokens <= max_seq_len, "Number of global tokens cannot exceed max sequence length"
+
+        # Device
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     @staticmethod
     def get_2M_config():
         """Returns config for ~2M parameter model with 6k vocab size"""
@@ -116,10 +128,25 @@ class TransformerConfig:
             
             # Architecture Options
             prenorm=True,
+            tie_embeddings=True,
             
-            # Default training features
+            # Training Features
             use_checkpointing=False,
             use_mixed_precision=True,
+            use_regularization=False,
+            label_smoothing=0.0,
+            l2_reg=0.0,
+            max_grad_norm=1.0,
+            
+            # Optimization
+            learning_rate=3e-4,
+            weight_decay=0.01,
+            warmup_ratio=0.1,
+            scheduler_type="linear_warmup",
+            
+            # Special Tokens
+            pad_token_id=0,
+            
             activation="gelu"
         )
 
@@ -148,6 +175,9 @@ class RotaryPositionalEmbedding(nn.Module):
         Returns:
             Tuple of (cos, sin) tensors for rotary embeddings
         """
+        if seq_len > self.max_seq_len:
+            raise ValueError(f"Sequence length {seq_len} exceeds maximum allowed length {self.max_seq_len}")
+        
         if seq_len > self.seq_len_cached:
             self.seq_len_cached = seq_len
             t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
@@ -241,9 +271,11 @@ class SparseMultiHeadAttention(nn.Module):
         # Handle attention mask if provided
         if attn_mask is not None:
             attn_mask = attn_mask.to(Q.device)
-            # Reshape from [batch_size, seq_len] to [batch_size, 1, 1, seq_len]
-            if attn_mask.dim() == 2:
+            # Handle different input mask dimensions
+            if attn_mask.dim() == 2:  # [batch_size, seq_len]
                 attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
+            elif attn_mask.dim() == 3:  # [batch_size, 1, seq_len]
+                attn_mask = attn_mask.unsqueeze(1)
             # Expand to [batch_size, num_heads, seq_len, seq_len]
             attn_mask = attn_mask.expand(batch_size, num_heads, seq_len, seq_len)
             # Apply mask by setting masked positions to -inf
@@ -281,7 +313,11 @@ class SparseMultiHeadAttention(nn.Module):
             output: (batch_size, seq_len, d_model)
             next_key_value: Optional[Tuple[Tensor, Tensor]]
         """
-        batch_size, seq_len, _ = q.size()
+        # Validate input shapes
+        batch_size, seq_len, d_model = q.size()
+        assert d_model == self.config.d_model, f"Input dimension {d_model} doesn't match config dimension {self.config.d_model}"
+        assert k.size(0) == batch_size and v.size(0) == batch_size, "Batch sizes must match"
+        assert k.size(-1) == d_model and v.size(-1) == d_model, "Hidden dimension must match"
         
         # 1) Project Q, K, V
         Q = self.w_q(q)
@@ -293,30 +329,46 @@ class SparseMultiHeadAttention(nn.Module):
         K_ = K_.view(batch_size, seq_len, self.config.num_heads, self.d_k).transpose(1, 2)
         V_ = V_.view(batch_size, seq_len, self.config.num_heads, self.d_k).transpose(1, 2)
 
-        # 3) If caching, concatenate new K/V with past K/V
+        # Apply RoPE if configured
+        if self.config.use_rope:
+            Q = self._apply_rope(Q, seq_len)
+            K_ = self._apply_rope(K_, K_.size(2))
+
+        # 3) Handle caching with validation
         if past_key_value is not None:
-            (past_k, past_v) = past_key_value
-            # K_ and V_ might correspond to only the "new" tokens
-            K_ = torch.cat([past_k, K_], dim=2)  # seq_len dimension
-            V_ = torch.cat([past_v, V_], dim=2)
+            try:
+                past_k, past_v = past_key_value
+                # Validate cache shapes
+                assert past_k.size(0) == batch_size, "Cache batch size must match"
+                assert past_k.size(1) == self.config.num_heads, "Cache heads must match"
+                assert past_k.size(-1) == self.d_k, "Cache dimension must match"
+                assert past_k.size() == past_v.size(), "Cache K,V shapes must match"
+                
+                K_ = torch.cat([past_k, K_], dim=2)  # seq_len dimension
+                V_ = torch.cat([past_v, V_], dim=2)
+            except Exception as e:
+                raise RuntimeError(f"Error processing cached KV: {str(e)}")
         
         next_key_value = None
         if use_cache:
-            # We'll return the entire K_, V_ for next step
             next_key_value = (K_, V_)
 
         # 4) Build or reuse local window mask
-        # The effective sequence length is K_.size(2)
         full_seq_len = K_.size(2)
-        local_mask = build_local_window_mask(full_seq_len, self.config.window_size, self.config.global_tokens)
+        local_mask = build_local_window_mask(full_seq_len, self.config.window_size, self.config.global_tokens, self.is_causal, self.config.device)
 
-        # 5) Compute attention
-        # We'll define a function for checkpoint if needed
+        # 5) Compute attention with proper error handling
         def fn_attention(Q_, K__, V__):
-            return self.attn_function(Q_, K__, V__, local_mask, attn_mask)
+            try:
+                output, _ = self.attn_function(Q_, K__, V__, local_mask, attn_mask)
+                return output
+            except RuntimeError as e:
+                if "out of memory" in str(e):
+                    torch.cuda.empty_cache()
+                    raise RuntimeError("GPU out of memory. Try reducing batch size or sequence length.")
+                raise e
         
         if self.config.use_checkpointing and Q.requires_grad:
-            # For memory efficiency, checkpoint the attention function
             output = checkpoint(fn_attention, Q, K_, V_)
         else:
             output = fn_attention(Q, K_, V_)
@@ -332,21 +384,26 @@ class SparseMultiHeadAttention(nn.Module):
 ###############################################################################
 # Local Window Mask with Optional Global Tokens
 ###############################################################################
-def build_local_window_mask(seq_len: int, window_size: int, global_tokens: int = 0, device: Optional[torch.device] = None) -> torch.Tensor:
-    """Build local window mask for attention.
-    
-    Args:
-        seq_len: Length of sequence
-        window_size: Size of local attention window
-        global_tokens: Number of global tokens that can attend to all positions
-        device: Device to create tensor on (defaults to CPU)
-    """
+def build_local_window_mask(
+    seq_len: int, 
+    window_size: int, 
+    global_tokens: int = 0, 
+    is_causal: bool = False,
+    device: Optional[torch.device] = None
+) -> torch.Tensor:
+    """Build local window mask for attention."""
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device=device)
+    
     for i in range(seq_len):
         for j in range(seq_len):
             if i < global_tokens or j < global_tokens:
                 continue
             if abs(i - j) > window_size:
+                mask[i, j] = float('-inf')
+            # Add causal masking if needed
+            if is_causal and j > i:
                 mask[i, j] = float('-inf')
     return mask
 
@@ -573,31 +630,13 @@ class Encoder(nn.Module):
 # Full Decoder
 ###############################################################################
 class Decoder(nn.Module):
-    def __init__(
-        self,
-        d_model,
-        num_heads,
-        window_size,
-        global_tokens,
-        d_ff,
-        num_layers,
-        dropout=0.1,
-        use_checkpointing=False
-    ):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
         self.layers = nn.ModuleList([
-            DecoderBlock(
-                d_model=d_model, 
-                num_heads=num_heads, 
-                window_size=window_size, 
-                global_tokens=global_tokens, 
-                d_ff=d_ff, 
-                dropout=dropout,
-                use_checkpointing=use_checkpointing
-            )
-            for _ in range(num_layers)
+            DecoderBlock(config)
+            for _ in range(config.num_layers)
         ])
-        self.norm = nn.LayerNorm(d_model)
+        self.norm = nn.LayerNorm(config.d_model)
 
     def forward(
         self, 
@@ -665,8 +704,14 @@ class Transformer(nn.Module):
         self._reset_parameters()
         
         # Training features
-        self.scaler = torch.amp.GradScaler(device ='cuda', enabled=config.use_mixed_precision)
-        self.metrics = {'train': {}, 'val': {}}
+        self.scaler = torch.amp.GradScaler(
+            device=config.device,
+            enabled=config.use_mixed_precision
+        )
+        self.metrics = {
+            'train': {'loss': [], 'accuracy': [], 'perplexity': []},
+            'val': {'loss': [], 'accuracy': [], 'perplexity': []}
+        }
         self.best_val_loss = float('inf')
 
     def _reset_parameters(self):
@@ -678,7 +723,9 @@ class Transformer(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
+        tgt: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        tgt_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
         use_cache: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]]:
@@ -687,7 +734,9 @@ class Transformer(nn.Module):
         
         Args:
             src: Input tensor of shape (batch_size, seq_len)
-            attention_mask: Optional attention mask
+            tgt: Target tensor of shape (batch_size, tgt_seq_len)
+            attention_mask: Optional attention mask for src
+            tgt_mask: Optional mask for tgt
             past_key_values: Optional cached key/value states for each layer
             use_cache: Whether to return cached key/value states
             
@@ -704,7 +753,7 @@ class Transformer(nn.Module):
         encoder_output, next_cache = self.encoder(
             x, 
             attention_mask,
-            past_key_values=past_key_values,
+            past_key_values=past_key_values if past_key_values is not None else None,
             use_cache=use_cache
         )
         
@@ -755,8 +804,7 @@ class Transformer(nn.Module):
                 src=batch['input_ids'],
                 tgt=batch['labels'],
                 src_mask=batch.get('attention_mask'),
-                tgt_mask=self._generate_square_subsequent_mask(batch['labels'].size(1))
-            )
+                tgt_mask=self._generate_square_subsequent_mask(batch['labels'].size(1)))
             
             loss = self.compute_loss(outputs, batch['labels'])
             metrics['loss'] = loss.item()
@@ -866,3 +914,12 @@ class Transformer(nn.Module):
                 num_warmup_steps=num_warmup_steps,
                 num_training_steps=num_training_steps
             )
+
+    @staticmethod
+    def _generate_square_subsequent_mask(sz: int) -> torch.Tensor:
+        """Generate a square mask for the sequence. The masked positions are filled with float('-inf').
+        Unmasked positions are filled with float(0.0).
+        """
+        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
