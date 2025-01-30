@@ -252,7 +252,6 @@ class Trainer:
             attention_mask = batch["attention_mask"].to(self.device)
             labels = batch["labels"].to(self.device)
 
-            # Specify the device type for autocast
             device_type = 'cuda' if self.device == 'cuda' else 'cpu'
 
             with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
@@ -270,9 +269,14 @@ class Trainer:
             if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
                 self.scaler.unscale_(self.optimizer)
                 clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
+                
+                # First optimizer step
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                
+                # Then scheduler step
                 self.scheduler.step()
+                
                 self.optimizer.zero_grad()
 
             # Log to W&B
