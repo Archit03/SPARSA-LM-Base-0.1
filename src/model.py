@@ -226,50 +226,34 @@ class SparseMultiHeadAttention(nn.Module):
         """
         Perform scaled dot-product attention with support for sparse local window masking 
         and optional additive attention masking.
-
-
-    Args:
-        Q (torch.Tensor): Query tensor of shape (batch_size, num_heads, seq_len, head_dim).
-        K (torch.Tensor): Key tensor of shape (batch_size, num_heads, seq_len, head_dim).
-        V (torch.Tensor): Value tensor of shape (batch_size, num_heads, seq_len, head_dim).
-        local_mask (torch.Tensor): Local window mask tensor of shape (seq_len, seq_len).
-                                   Indicates positions to mask out based on a local window.
-        attn_mask (Optional[torch.Tensor]): Additive attention mask of shape 
-                                            (batch_size, seq_len) or 
-                                            (batch_size, seq_len, seq_len).
-                                            Used to mask certain tokens or positions 
-                                            in the attention computation.
-        
-        Returns:
-        Tuple[torch.Tensor, torch.Tensor]:
-            - output (torch.Tensor): The resulting tensor after applying attention,
-              of shape (batch_size, num_heads, seq_len, head_dim).
-            - scores (torch.Tensor): The normalized attention scores of shape 
-              (batch_size, num_heads, seq_len, seq_len).
-        
-        Notes:
-        - This function uses scaled dot-product attention.
-        - Handles broadcasting and alignment of attention masks to match `Q`, `K`, and `V`.
-        - Supports masking out-of-window positions using `local_mask` and
-          masking specific tokens or positions using `attn_mask`.
-          
         """
-        print(f"Q shape: {Q.shape}, K shape: {K.shape}, V shape: {V.shape}, attn_mask shape: {attn_mask.shape}")
         batch_size, num_heads, seq_len, _ = Q.size()
-        local_mask = local_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, num_heads, seq_len, seq_len)  # (1, 1, seq_len, seq_len)
-
-        if attn_mask is not None:
-            attn_mask = attn_mask[:, None, None, :].expand(batch_size, num_heads, seq_len, seq_len)
         
-        #Calculate attention scores
+        # Ensure local_mask is on the correct device and expand
+        local_mask = local_mask.to(Q.device)
+        local_mask = local_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, num_heads, seq_len, seq_len)
+
+        # Calculate attention scores
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
+        # Handle attention mask if provided
         if attn_mask is not None:
-            scores += attn_mask
+            attn_mask = attn_mask.to(Q.device)
+            # Reshape from [batch_size, seq_len] to [batch_size, 1, 1, seq_len]
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
+            # Expand to [batch_size, num_heads, seq_len, seq_len]
+            attn_mask = attn_mask.expand(batch_size, num_heads, seq_len, seq_len)
+            # Apply mask by setting masked positions to -inf
+            scores = scores.masked_fill(~attn_mask.bool(), float('-inf'))
+
+        # Apply local window mask
         scores = scores + local_mask
+        
+        # Apply softmax
         scores = scores.softmax(dim=-1)
 
-        #Compute final attn output
+        # Compute final attn output
         output = torch.matmul(scores, V)
 
         return output, scores
