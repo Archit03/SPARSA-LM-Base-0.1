@@ -133,6 +133,14 @@ class Trainer:
             )
             self.model = Transformer(model_config).to(self.config['training']['device'])
 
+            # Print model parameter count
+            total_params = sum(p.numel() for p in self.model.parameters())
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            self.logger.info(f"LuminaLM Model Parameters:")
+            self.logger.info(f"Total parameters: {total_params:,}")
+            self.logger.info(f"Trainable parameters: {trainable_params:,}")
+            self.logger.info(f"Non-trainable parameters: {total_params - trainable_params:,}")
+
             # Optimizer, scheduler, and loss
             self.optimizer = self._configure_optimizer()
             num_training_steps = len(self.train_loader) * self.config['training']['epochs']

@@ -17,26 +17,26 @@ class TransformerConfig:
         self,
         # Model Architecture
         vocab_size: int,
-        d_model: int,
+        d_model: int,  # hidden_dim in config
         num_layers: int,
         num_heads: int,
-        d_ff: int,
+        d_ff: int,  # ff_dim in config
         max_seq_len: int,
         dropout: float,
         
         # Attention Mechanisms
-        use_rope: bool,
-        window_size: int,
-        global_tokens: int,
+        use_rope: bool = True,
+        window_size: int = 4,
+        global_tokens: int = 0,
         
         # Architecture Options
         prenorm: bool = True,
-        tie_embeddings: bool = True,
+        tie_embeddings: bool = False,
         
         # Training Features
         use_checkpointing: bool = False,
         use_regularization: bool = False,
-        use_mixed_precision: bool = False,
+        use_mixed_precision: bool = True,
         label_smoothing: float = 0.0,
         l2_reg: float = 0.0,
         max_grad_norm: float = 1.0,
@@ -45,7 +45,7 @@ class TransformerConfig:
         learning_rate: float = 3e-4,
         weight_decay: float = 0.01,
         warmup_ratio: float = 0.1,
-        scheduler_type: str = "linear_warmup",
+        scheduler_type: str = "linear",
         
         # Special Tokens
         pad_token_id: int = 0,
@@ -63,10 +63,10 @@ class TransformerConfig:
         
         # Model Architecture
         self.vocab_size = vocab_size
-        self.d_model = d_model
+        self.d_model = d_model  # This is hidden_dim from config
         self.num_layers = num_layers
         self.num_heads = num_heads
-        self.d_ff = d_ff
+        self.d_ff = d_ff  # This is ff_dim from config
         self.max_seq_len = max_seq_len
         self.dropout = dropout
         
