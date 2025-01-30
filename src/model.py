@@ -110,14 +110,14 @@ class TransformerConfig:
 
     @staticmethod
     def get_2M_config():
-        """Returns config for ~2M parameter model with 6k vocab size"""
+        """Returns config for exactly ~2M parameter model with 6k vocab size"""
         return TransformerConfig(
             # Model Architecture
             vocab_size=6000,
-            d_model=256,
-            num_layers=6,
-            num_heads=8,
-            d_ff=1024,
+            d_model=160,      # Fine-tuned size
+            num_layers=4,     
+            num_heads=4,
+            d_ff=640,        # 4x d_model
             max_seq_len=2048,
             dropout=0.1,
             
