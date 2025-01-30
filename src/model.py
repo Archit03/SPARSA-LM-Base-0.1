@@ -114,10 +114,10 @@ class TransformerConfig:
         return TransformerConfig(
             # Model Architecture
             vocab_size=6000,
-            d_model=160,      # Fine-tuned size
-            num_layers=4,     
+            d_model=128,      # Reduced size
+            num_layers=3,     # Reduced layers
             num_heads=4,
-            d_ff=640,        # 4x d_model
+            d_ff=512,        # 4x d_model
             max_seq_len=2048,
             dropout=0.1,
             
@@ -128,7 +128,7 @@ class TransformerConfig:
             
             # Architecture Options
             prenorm=True,
-            tie_embeddings=True,
+            tie_embeddings=True,  # Important for parameter sharing
             
             # Training Features
             use_checkpointing=False,
