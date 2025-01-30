@@ -39,16 +39,16 @@ tokenizer:
   add_special_tokens: true  # Ensure special tokens are added if missing
 
 model:
-  num_layers: 8  # Number of transformer layers
+  num_layers: 4  # Number of transformer layers
   num_heads: 4  # Number of attention heads
-  hidden_dim: 256  # Hidden dimension size
-  ff_dim: 1024  # Feed-forward layer dimension size
+  hidden_dim: 128  # Hidden dimension size
+  ff_dim: 512  # Feed-forward layer dimension size (4x hidden_dim)
   dropout: 0.1  # Dropout rate
-  vocab_size: 32000  # Vocabulary size
+  vocab_size: 6000  # Vocabulary size
   max_seq_len: 512  # Maximum sequence length
   use_checkpointing: false  # Enable gradient checkpointing for memory efficiency
   activation: "gelu"  # Activation function: "relu", "gelu", "silu"
-  tie_embeddings: false  # Share embeddings between input and output tokens
+  tie_embeddings: true  # Share embeddings between input and output tokens to reduce parameters
 
 logging:
   log_dir: "logs"  # Directory to save logs
