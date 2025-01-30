@@ -252,55 +252,44 @@ class Trainer:
 
     def train_one_epoch(self, epoch: int):
         self.model.train()
-        total_loss = 0
-        progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch + 1}")
+        total_loss = 0.0
+        progress_bar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}")
 
         for step, batch in enumerate(progress_bar):
-            inputs = batch["input_ids"].to(self.device)
-            attention_mask = batch["attention_mask"].to(self.device)
-            labels = batch["labels"].to(self.device)
+            inputs, attention_mask, labels = (
+                batch["input_ids"].to(self.device),
+                batch["attention_mask"].to(self.device),
+                batch["labels"].to(self.device)
+            )
 
-            device_type = 'cuda' if self.device == 'cuda' else 'cpu'
-
-            with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
+            with autocast(device_type=self.device, enabled=self.config['training'].get('use_mixed_precision', True)):
                 outputs = self.model(inputs, attention_mask=attention_mask)
                 loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
-                loss = loss / self.gradient_accumulation_steps
+                loss = loss / self.config['training']['gradient_accumulation_steps']
 
             total_loss += loss.item()
             progress_bar.set_postfix(loss=loss.item())
 
-            # Backward pass
             self.scaler.scale(loss).backward()
 
-            # Gradient accumulation step
-            if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+            if (step + 1) % self.config['training']['gradient_accumulation_steps'] == 0 or (step + 1) == len(self.train_loader):
                 self.scaler.unscale_(self.optimizer)
                 clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
-                
-                # First optimizer step
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                
-                # Then scheduler step
                 self.scheduler.step()
-                
                 self.optimizer.zero_grad()
 
-            # Log to W&B
             if self.use_wandb:
-                self._log_gradients_and_activations()
                 wandb.log({
-                    "model": "LuminaLM",
                     "train_loss": loss.item(),
                     "lr": self.scheduler.get_last_lr()[0]
                 })
 
         avg_loss = total_loss / len(self.train_loader)
         train_perplexity = self._calculate_perplexity(avg_loss)
-        self.logger.info(f"LuminaLM Epoch {epoch + 1} Training Loss: {avg_loss:.4f}, Perplexity: {train_perplexity:.2f}")
+        self.logger.info(f"Epoch {epoch + 1} Training Loss: {avg_loss:.4f}, Perplexity: {train_perplexity:.2f}")
         return avg_loss, train_perplexity
-
 
     @torch.no_grad()
     def validate(self, epoch: int):
