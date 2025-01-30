@@ -236,7 +236,10 @@ class SparseMultiHeadAttention(nn.Module):
         local_mask = local_mask.to(Q.device)
         local_mask = local_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, num_heads, seq_len, seq_len)
 
-        # Ensure attention mask is on the correct device and reshape
+        # Calculate attention scores
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+
+        # Handle attention mask if provided
         if attn_mask is not None:
             attn_mask = attn_mask.to(Q.device)
             # Reshape from [batch_size, seq_len] to [batch_size, 1, 1, seq_len]
@@ -244,15 +247,13 @@ class SparseMultiHeadAttention(nn.Module):
                 attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
             # Expand to [batch_size, num_heads, seq_len, seq_len]
             attn_mask = attn_mask.expand(batch_size, num_heads, seq_len, seq_len)
-            # Convert boolean/mask values to -inf/0
-            attn_mask = attn_mask.masked_fill(attn_mask == 0, float('-inf'))
-        
-        # Calculate attention scores
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+            # Apply mask by setting masked positions to -inf
+            scores = scores.masked_fill(~attn_mask.bool(), float('-inf'))
 
-        if attn_mask is not None:
-            scores = scores + attn_mask
+        # Apply local window mask
         scores = scores + local_mask
+        
+        # Apply softmax
         scores = scores.softmax(dim=-1)
 
         # Compute final attn output
