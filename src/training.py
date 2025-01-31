@@ -253,7 +253,7 @@ class Trainer:
         self.logger.info(f"Training batches per epoch: {num_batches}")
         progress_bar = tqdm(self.train_loader, total=num_batches, desc=f"LuminaLM Training Epoch {epoch + 1}")
 
-        for step, batch in progress_bar:
+        for batch in progress_bar:
             inputs = batch["input_ids"].to(self.config['training']['device'])
             attention_mask = batch["attention_mask"].to(self.config['training']['device'])
             labels = batch["labels"].to(self.config['training']['device'])
@@ -273,7 +273,7 @@ class Trainer:
             self.scaler.scale(loss).backward()
 
             # Gradient accumulation step
-            if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+            if (batch['index'] + 1) % self.gradient_accumulation_steps == 0 or (batch['index'] + 1) == len(self.train_loader):
                 self.scaler.unscale_(self.optimizer)
                 clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
                 # Perform optimizer step first
@@ -317,10 +317,10 @@ class Trainer:
         device = self.config['training']['device']
         
         try:
-            for batch_idx, batch in progress_bar:
+            for batch in progress_bar:
                 # Validate batch structure
                 if not isinstance(batch, dict) or not all(k in batch for k in ["input_ids", "attention_mask", "labels"]):
-                    self.logger.error(f"Batch {batch_idx}: Invalid structure: {batch.keys() if isinstance(batch, dict) else type(batch)}")
+                    self.logger.error(f"Batch: Invalid structure: {batch.keys() if isinstance(batch, dict) else type(batch)}")
                     continue
 
                 # Move data to device efficiently
@@ -331,7 +331,7 @@ class Trainer:
                     }
                     labels = batch["labels"].to(device, non_blocking=True)
                 except RuntimeError as e:
-                    self.logger.error(f"Batch {batch_idx}: Device transfer failed: {str(e)}")
+                    self.logger.error(f"Device transfer failed: {str(e)}")
                     continue
 
                 # Forward pass with error handling
@@ -344,12 +344,12 @@ class Trainer:
                     progress_bar.set_postfix({"val_loss": f"{loss.item():.4f}"})
 
                 except RuntimeError as e:
-                    self.logger.error(f"Batch {batch_idx}: Forward pass failed: {str(e)}")
+                    self.logger.error(f"Forward pass failed: {str(e)}")
                     continue
 
                 # Optional: Log memory usage
                 if hasattr(self, 'memory_monitor'):
-                    self.logger.debug(f"Validation Step {batch_idx}: {self.memory_monitor.get_memory_usage()}")
+                    self.logger.debug(f"Validation Step: {self.memory_monitor.get_memory_usage()}")
 
             # Calculate final metrics
             avg_loss = total_loss / num_batches if num_batches > 0 else float("inf")
