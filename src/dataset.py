@@ -154,6 +154,7 @@ class TextDataset(Dataset):
             "labels": encoding.input_ids.squeeze(0),
         }
 
+    
     @staticmethod
     def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
@@ -165,4 +166,10 @@ class TextDataset(Dataset):
         Returns:
             A dictionary of stacked tensors for each field.
         """
+        # Remove empty samples
+        batch = [sample for sample in batch if sample is not None]
+
+        if len(batch) == 0:
+            return {}  # Return empty dict instead of crashing
+
         return {key: torch.stack([sample[key] for sample in batch]) for key in batch[0].keys()}
