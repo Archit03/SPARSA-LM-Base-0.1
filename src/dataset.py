@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from sklearn.model_selection import train_test_split
+import numpy as np
 
 
 class DatasetProcessor:
@@ -70,13 +71,32 @@ class DatasetProcessor:
 
     def _load_and_split_data(self):
         """
-        Load and split data into training and validation sets.
+        Load and split data into training and validation sets using stratified sampling.
         """
         self.logger.info("Loading and splitting data...")
         self.data = self._load_source_data()
-        self.train_data, self.val_data = train_test_split(
-            self.data, test_size=self.test_size, random_state=self.random_state
-        )
+        
+        # Create labels for stratification based on sentence length
+        # We'll create bins of sentence lengths to avoid too many unique classes
+        sentence_lengths = [len(text.split()) for text in self.data]
+        bins = np.linspace(min(sentence_lengths), max(sentence_lengths), 10)  # 10 bins
+        labels = np.digitize(sentence_lengths, bins)
+        
+        try:
+            self.train_data, self.val_data = train_test_split(
+                self.data, 
+                test_size=self.test_size, 
+                random_state=self.random_state,
+                stratify=labels
+            )
+        except ValueError as e:
+            self.logger.warning(f"Stratified split failed: {e}. Falling back to random split.")
+            self.train_data, self.val_data = train_test_split(
+                self.data, 
+                test_size=self.test_size, 
+                random_state=self.random_state
+            )
+        
         self.logger.info(f"Train dataset size: {len(self.train_data)}")
         self.logger.info(f"Validation dataset size: {len(self.val_data)}")
 
