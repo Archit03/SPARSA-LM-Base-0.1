@@ -242,9 +242,10 @@ class Trainer:
     def train_one_epoch(self, epoch: int):
         self.model.train()
         total_loss = 0
-        progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch + 1}")
+        num_batches = len(self.train_loader)
+        progress_bar = tqdm(enumerate(self.train_loader), total=num_batches, desc=f"LuminaLM Training Epoch {epoch + 1}")
 
-        for step, batch in enumerate(progress_bar):
+        for step, batch in progress_bar:
             inputs = batch["input_ids"].to(self.config['training']['device'])
             attention_mask = batch["attention_mask"].to(self.config['training']['device'])
             labels = batch["labels"].to(self.config['training']['device'])
@@ -252,38 +253,38 @@ class Trainer:
             # Specify the device type for autocast
             device_type = 'cuda' if self.config['training']['device'] == 'cuda' else 'cpu'
 
-        with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
-            outputs = self.model(inputs, attention_mask=attention_mask)
-            loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
-            loss = loss / self.gradient_accumulation_steps
+            with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
+                outputs = self.model(inputs, attention_mask=attention_mask)
+                loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
+                loss = loss / self.gradient_accumulation_steps
 
-        total_loss += loss.item()
-        progress_bar.set_postfix(loss=loss.item())
+            total_loss += loss.item()
+            progress_bar.set_postfix(loss=f"{loss.item():.4f}")
 
-        # Backward pass
-        self.scaler.scale(loss).backward()
+            # Backward pass
+            self.scaler.scale(loss).backward()
 
-        # Gradient accumulation step
-        if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
-            self.scaler.unscale_(self.optimizer)
-            clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
-            # Perform optimizer step first
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            # Gradient accumulation step
+            if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+                self.scaler.unscale_(self.optimizer)
+                clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
+                # Perform optimizer step first
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
 
-             # 🔹 FIX: Call scheduler step **after** optimizer step
-            self.scheduler.step()  
+                 # 🔹 FIX: Call scheduler step **after** optimizer step
+                self.scheduler.step()  
 
-            self.optimizer.zero_grad()  #ved after optimizer step
+                self.optimizer.zero_grad()  #ved after optimizer step
 
-        # Log to W&B
-        if self.use_wandb:
-            self._log_gradients_and_activations()
-            wandb.log({
-                "model": "LuminaLM",
-                "train_loss": loss.item(),
-                "lr": self.scheduler.get_last_lr()[0]
-            })
+            # Log to W&B
+            if self.use_wandb:
+                self._log_gradients_and_activations()
+                wandb.log({
+                    "model": "LuminaLM",
+                    "train_loss": loss.item(),
+                    "lr": self.scheduler.get_last_lr()[0]
+                })
 
         avg_loss = total_loss / len(self.train_loader)
         train_perplexity = self._calculate_perplexity(avg_loss)
@@ -302,12 +303,12 @@ class Trainer:
         self.model.eval()
         total_loss = 0
         num_batches = len(self.val_loader)
-        progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validation Epoch {epoch + 1}")
+        progress_bar = tqdm(enumerate(self.val_loader), total=num_batches, desc=f"LuminaLM Validation Epoch {epoch + 1}")
 
         device = self.config['training']['device']
         
         try:
-            for batch_idx, batch in enumerate(progress_bar):
+            for batch_idx, batch in progress_bar:
                 # Validate batch structure
                 if not isinstance(batch, dict) or not all(k in batch for k in ["input_ids", "attention_mask", "labels"]):
                     self.logger.error(f"Batch {batch_idx}: Invalid structure: {batch.keys() if isinstance(batch, dict) else type(batch)}")
