@@ -54,7 +54,10 @@ class TransformerConfig:
         activation: str = "gelu",  # Options: "gelu", "relu", "silu"
         
         # Device
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = None,
+        
+        # Added this parameter
+        use_reentrant: bool = False
     ):
         """Initialize transformer configuration with validation."""
         # Validate core architecture parameters
@@ -107,6 +110,9 @@ class TransformerConfig:
 
         # Device
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Added this line
+        self.use_reentrant = use_reentrant
 
     @staticmethod
     def get_2M_config():
@@ -415,11 +421,12 @@ class ResidualConnection(nn.Module):
     y = x + dropout(sublayer(LN(x)))
     If gradient checkpointing is enabled, wraps the sublayer call in checkpoint().
     """
-    def __init__(self, d_model, dropout=0.1, use_checkpointing=False):
+    def __init__(self, d_model, dropout=0.1, use_checkpointing=False, use_reentrant=False):
         super().__init__()
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         self.use_checkpointing = use_checkpointing
+        self.use_reentrant = use_reentrant
 
     def forward(self, x, sublayer):
         """
@@ -431,7 +438,11 @@ class ResidualConnection(nn.Module):
         normed = self.norm(x)
 
         if self.use_checkpointing and normed.requires_grad:
-            out = x + self.dropout(checkpoint(forward_sublayer, normed))
+            out = x + self.dropout(checkpoint(
+                forward_sublayer, 
+                normed,
+                use_reentrant=self.use_reentrant
+            ))
         else:
             out = x + self.dropout(sublayer(normed))
         return out
@@ -464,20 +475,19 @@ class FeedForward(nn.Module):
 # Encoder Block with Sparse Attention + Global Option + Checkpointing
 ###############################################################################
 class EncoderBlock(nn.Module):
-    def __init__(
-        self, 
-        config: TransformerConfig
-    ):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
         self.self_attn_res = ResidualConnection(
             config.d_model, 
             config.dropout, 
-            config.use_checkpointing
+            config.use_checkpointing,
+            config.use_reentrant
         )
         self.ff_res = ResidualConnection(
             config.d_model, 
             config.dropout, 
-            config.use_checkpointing
+            config.use_checkpointing,
+            config.use_reentrant
         )
 
         self.self_attn = SparseMultiHeadAttention(config)
@@ -516,7 +526,8 @@ class DecoderBlock(nn.Module):
         self.self_attn_res = ResidualConnection(
             config.d_model, 
             config.dropout, 
-            config.use_checkpointing
+            config.use_checkpointing,
+            config.use_reentrant
         )
         self.self_attn = SparseMultiHeadAttention(config, is_causal=True)
 
@@ -524,7 +535,8 @@ class DecoderBlock(nn.Module):
         self.cross_attn_res = ResidualConnection(
             config.d_model, 
             config.dropout, 
-            config.use_checkpointing
+            config.use_checkpointing,
+            config.use_reentrant
         )
         self.cross_attn = SparseMultiHeadAttention(config)
 
@@ -532,7 +544,8 @@ class DecoderBlock(nn.Module):
         self.ff_res = ResidualConnection(
             config.d_model, 
             config.dropout, 
-            config.use_checkpointing
+            config.use_checkpointing,
+            config.use_reentrant
         )
         self.feed_forward = FeedForward(config)
 
