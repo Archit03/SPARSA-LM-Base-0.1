@@ -233,23 +233,47 @@ class Trainer:
         """Calculate perplexity from loss."""
         return torch.exp(torch.tensor(loss)).item()
 
-    def _early_stopping(self, metric: float, restore_best: bool = True) -> bool:
-        """Enhanced early stopping with best model restoration."""
-        if self.best_metric is None or metric < self.best_metric:
-            self.best_metric = metric
+    def _early_stopping(self, val_metric: float) -> bool:
+        """Enhanced early stopping with best model preservation."""
+        improved = val_metric < self.best_metric
+        if improved:
+            self.best_metric = val_metric
             self.stopping_counter = 0
-            self.best_model_state = {
-                key: value.cpu().clone() for key, value in self.model.state_dict().items()
-            }
-        else:
-            self.stopping_counter += 1
-
+            self._save_best_model()
+            return False
+        
+        self.stopping_counter += 1
         if self.stopping_counter >= self.early_stopping_patience:
-            if restore_best and hasattr(self, 'best_model_state'):
-                self.model.load_state_dict(self.best_model_state)
-                self.logger.info("Restored best model state for early stopping")
+            self.logger.info(f"Early stopping triggered after {self.stopping_counter} epochs without improvement")
+            self._restore_best_model()
             return True
+        
         return False
+
+    def _save_best_model(self):
+        """Save the best model state."""
+        best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_model.pt')
+        torch.save({
+            'epoch': self.current_epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'best_metric': self.best_metric,
+            'config': self.config
+        }, best_model_path)
+        self.logger.info(f"Saved best model to {best_model_path}")
+
+    def _restore_best_model(self):
+        """Restore the best model state."""
+        best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_model.pt')
+        if os.path.exists(best_model_path):
+            checkpoint = torch.load(best_model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            self.logger.info("Restored best model state")
+        else:
+            self.logger.warning("No best model checkpoint found to restore")
 
     def _log_training_metrics(self, loss: float, step: int, epoch: int):
         """Structured logging of training metrics."""
@@ -257,101 +281,142 @@ class Trainer:
             return
 
         metrics = {
-            "model": "LuminaLM",
-            "train_loss": loss,
-            "learning_rate": self.scheduler.get_last_lr()[0],
-            "epoch": epoch,
-            "step": step,
-            "memory_allocated": torch.cuda.memory_allocated() if torch.cuda.is_available() else 0,
-            "memory_reserved": torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
+            "train/loss": loss,
+            "train/learning_rate": self.scheduler.get_last_lr()[0],
+            "train/epoch": epoch,
+            "train/step": step,
         }
 
-        # Log gradients with controlled frequency
+        # Log memory stats if available
+        if torch.cuda.is_available():
+            metrics.update({
+                "system/gpu_memory_allocated": torch.cuda.memory_allocated(),
+                "system/gpu_memory_reserved": torch.cuda.memory_reserved()
+            })
+
+        # Log gradients at specified intervals
         if step % self.config['logging'].get('gradient_logging_frequency', 1000) == 0:
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    metrics[f"gradient_norm/{name}"] = param.grad.norm().item()
+            grad_norm = self._compute_gradient_norm()
+            metrics["train/gradient_norm"] = grad_norm
 
         wandb.log(metrics)
 
+    def _compute_gradient_norm(self) -> float:
+        """Compute the total gradient norm."""
+        total_norm = 0.0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        return total_norm ** 0.5
+
     def train_one_epoch(self, epoch: int):
+        """Train the model for one epoch with proper gradient accumulation."""
         self.model.train()
         total_loss = 0
         accumulated_loss = 0
+        accumulated_samples = 0
+        
         progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch + 1}")
 
         try:
+            # Zero gradients at the start of epoch
+            self.optimizer.zero_grad(set_to_none=True)
+
             for step, batch in enumerate(progress_bar):
                 # Move batch to appropriate device
                 inputs = batch["input_ids"].to(self.config['training']['device'])
                 attention_mask = batch["attention_mask"].to(self.config['training']['device'])
                 labels = batch["labels"].to(self.config['training']['device'])
-
-                # Determine device type safely
-                if torch.cuda.is_available() and 'cuda' in str(self.config['training']['device']):
-                    device_type = 'cuda'
-                elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                    device_type = 'mps'
-                else:
-                    device_type = 'cpu'
-
-                # Forward pass with autocast
-                with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
+                
+                # Compute loss with mixed precision
+                with torch.autocast(device_type=self._get_device_type(), 
+                                  enabled=self.config['training'].get('use_mixed_precision', True)):
                     outputs = self.model(inputs, attention_mask=attention_mask)
                     loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
                     loss = loss / self.gradient_accumulation_steps
 
                 # Accumulate loss for logging
-                accumulated_loss += loss.item()
+                accumulated_loss += loss.item() * self.gradient_accumulation_steps
+                accumulated_samples += 1
 
-                # Backward pass with gradient accumulation
+                # Backward pass
                 self.scaler.scale(loss).backward()
 
                 # Update weights when gradient accumulation is complete
-                if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+                if accumulated_samples == self.gradient_accumulation_steps:
                     try:
-                        # Unscale gradients for clipping
+                        # Unscale gradients
                         self.scaler.unscale_(self.optimizer)
                         
                         # Clip gradients
-                        clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), 
+                            self.config['training'].get('max_grad_norm', 1.0)
+                        )
                         
                         # Optimizer step
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
                         self.scheduler.step()
-                        self.optimizer.zero_grad(set_to_none=True)  # More memory efficient
+                        
+                        # Zero gradients
+                        self.optimizer.zero_grad(set_to_none=True)
 
-                        # Update total loss and reset accumulation
-                        total_loss += accumulated_loss
+                        # Update metrics
+                        total_loss += accumulated_loss / accumulated_samples
+                        
+                        # Log metrics
+                        if self.use_wandb:
+                            self._log_training_metrics(
+                                loss=accumulated_loss / accumulated_samples,
+                                step=step,
+                                epoch=epoch
+                            )
+
+                        # Reset accumulation
                         accumulated_loss = 0
+                        accumulated_samples = 0
 
                         # Update progress bar
-                        progress_bar.set_postfix(
-                            loss=loss.item() * self.gradient_accumulation_steps,
-                            lr=self.scheduler.get_last_lr()[0]
-                        )
+                        progress_bar.set_postfix({
+                            'loss': total_loss / (step + 1),
+                            'lr': self.scheduler.get_last_lr()[0]
+                        })
 
                     except RuntimeError as e:
                         if "out of memory" in str(e):
-                            if hasattr(torch.cuda, 'empty_cache'):
-                                torch.cuda.empty_cache()
-                            self.logger.error("GPU OOM detected. Attempting to recover...")
+                            self._handle_oom_error()
                             continue
                         raise e
-
-                # Log to W&B with controlled frequency
-                if self.use_wandb and (step + 1) % self.config['logging'].get('log_frequency', 100) == 0:
-                    self._log_training_metrics(loss.item(), step, epoch)
 
         except Exception as e:
             self.logger.error(f"Error in training loop: {str(e)}")
             raise
 
-        avg_loss = total_loss / (len(self.train_loader) // self.gradient_accumulation_steps)
-        train_perplexity = self._calculate_perplexity(avg_loss)
+        avg_loss = total_loss / len(self.train_loader)
+        return avg_loss, self._calculate_perplexity(avg_loss)
+
+    def _get_device_type(self) -> str:
+        """Determine the correct device type for autocast."""
+        if torch.cuda.is_available() and 'cuda' in str(self.config['training']['device']):
+            return 'cuda'
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            return 'mps'
+        return 'cpu'
+
+    def _handle_oom_error(self):
+        """Handle out of memory errors gracefully."""
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
+        self.logger.warning("OOM detected. Attempting to recover...")
         
-        return avg_loss, train_perplexity
+        # Reduce batch size if possible
+        if self.config['training']['batch_size'] > 1:
+            self.config['training']['batch_size'] //= 2
+            self.logger.warning(f"Reduced batch size to {self.config['training']['batch_size']}")
+            
+            # Recreate data loaders with new batch size
+            self._setup_dataloaders()
 
     @torch.no_grad()
     def validate(self, epoch: int):
