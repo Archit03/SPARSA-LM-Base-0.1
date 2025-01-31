@@ -102,6 +102,7 @@ class Trainer:
             )
 
             # Model configuration and initialization
+            checkpointing_params = self.config['model'].get('checkpointing_params', {})
             model_config = TransformerConfig(
                 d_model=self.config['model']['hidden_dim'],
                 num_heads=self.config['model']['num_heads'],
@@ -124,7 +125,8 @@ class Trainer:
                 max_grad_norm=self.config['training'].get('max_grad_norm', 1.0),
                 pad_token_id=self.tokenizer.pad_token_id,
                 l2_reg=self.config['training'].get('l2_reg', 0.0),
-                use_checkpointing=self.config['model'].get('use_checkpointing', False)
+                use_checkpointing=self.config['model'].get('use_checkpointing', False),
+                use_reentrant=checkpointing_params.get('use_reentrant', False)
             )
             self.model = Transformer(model_config).to(self.config['training']['device'])
 
