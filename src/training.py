@@ -251,9 +251,9 @@ class Trainer:
         total_loss = 0
         num_batches = len(self.train_loader)
         self.logger.info(f"Training batches per epoch: {num_batches}")
-        progress_bar = tqdm(self.train_loader, total=num_batches, desc=f"LuminaLM Training Epoch {epoch + 1}")
+        progress_bar = tqdm(enumerate(self.train_loader), total=num_batches, desc=f"LuminaLM Training Epoch {epoch + 1}")
 
-        for batch in progress_bar:
+        for batch_idx, batch in progress_bar:
             inputs = batch["input_ids"].to(self.config['training']['device'])
             attention_mask = batch["attention_mask"].to(self.config['training']['device'])
             labels = batch["labels"].to(self.config['training']['device'])
@@ -273,17 +273,13 @@ class Trainer:
             self.scaler.scale(loss).backward()
 
             # Gradient accumulation step
-            if (batch['index'] + 1) % self.gradient_accumulation_steps == 0 or (batch['index'] + 1) == len(self.train_loader):
+            if (batch_idx + 1) % self.gradient_accumulation_steps == 0 or (batch_idx + 1) == len(self.train_loader):
                 self.scaler.unscale_(self.optimizer)
                 clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
-                # Perform optimizer step first
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-
-                 # 🔹 FIX: Call scheduler step **after** optimizer step
-                self.scheduler.step()  
-
-                self.optimizer.zero_grad()  #ved after optimizer step
+                self.scheduler.step()
+                self.optimizer.zero_grad()
 
             # Log to W&B
             if self.use_wandb:
