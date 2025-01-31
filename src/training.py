@@ -55,15 +55,12 @@ class Trainer:
             datasets = self.data_config.get('datasets', [])
             if not isinstance(datasets, list):
                 raise ConfigurationError("'datasets' must be a list of dataset configurations.")
-            # 🔹 FIX: Ensure 'source_dir' exists with single validation
-            source_dir = None
-            for dataset in datasets:
-                if dataset.get('name') == self.config['dataset']['train_dataset']:
-                    source_dir = dataset.get('config', {}).get('source_dir')
-                    break
-
+            source_dir = next(
+                (d.get('config', {}).get('source_dir') for d in datasets if d.get('name') == self.config['dataset']['train_dataset']),
+                None
+            )
             if not source_dir or not os.path.exists(source_dir):
-                raise ConfigurationError(f"Invalid or missing source directory: {source_dir}")
+                raise ConfigurationError(f"Invalid source directory: {source_dir}")
 
             split_config = self.config['dataset'].get('split', {'test_size': 0.2, 'random_state': 42})
             preprocessing_config = self.config['dataset'].get('preprocessing', {})
@@ -103,13 +100,6 @@ class Trainer:
                 collate_fn=TextDataset.collate_fn,
                 drop_last=self.config['training'].get('drop_last', False)
             )
-
-            # After initializing the data loaders, add these log statements
-            num_train_batches = len(self.train_loader)
-            num_val_batches = len(self.val_loader)
-            self.logger.info(f"Number of training batches: {num_train_batches}")
-            self.logger.info(f"Number of validation batches: {num_val_batches}")
-            self.logger.info(f"Batch size: {self.config['training']['batch_size']}")
 
             # Model configuration and initialization
             model_config = TransformerConfig(
@@ -165,11 +155,6 @@ class Trainer:
             # Gradient accumulation and mixed precision
             self.gradient_accumulation_steps = self.config['training']['gradient_accumulation_steps']
             self.scaler = GradScaler(enabled=self.config['training'].get('use_mixed_precision', True))
-
-            # Initialize early stopping variables
-            self.best_val_loss = float('inf')
-            self.stopping_counter = 0
-            self.early_stopping_patience = self.config['training'].get('early_stopping_patience', 5)
 
         except Exception as e:
             raise RuntimeError(f"LuminaLM Initialization failed: {e}")
@@ -227,15 +212,14 @@ class Trainer:
         """Calculate perplexity from loss."""
         return torch.exp(torch.tensor(loss)).item()
 
-    def _early_stopping(self, val_loss):
-        """Check if training should stop based on validation loss trend."""
-        if val_loss < self.best_val_loss:
-            self.best_val_loss = val_loss
-            self.stopping_counter = 0  # Reset patience
+    def _early_stopping(self, metric):
+        """Implement early stopping mechanism."""
+        if metric < self.best_metric:
+            self.best_metric = metric
+            self.stopping_counter = 0
         else:
-            self.stopping_counter += 1  # Increase counter if no improvement
+            self.stopping_counter += 1
 
-        # Stop training if no improvement for 'patience' epochs
         return self.stopping_counter >= self.early_stopping_patience
 
     def _log_gradients_and_activations(self):
@@ -249,11 +233,9 @@ class Trainer:
     def train_one_epoch(self, epoch: int):
         self.model.train()
         total_loss = 0
-        num_batches = len(self.train_loader)
-        self.logger.info(f"Training batches per epoch: {num_batches}")
-        progress_bar = tqdm(enumerate(self.train_loader), total=num_batches, desc=f"LuminaLM Training Epoch {epoch + 1}")
+        progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch + 1}")
 
-        for batch_idx, batch in progress_bar:
+        for step, batch in enumerate(progress_bar):
             inputs = batch["input_ids"].to(self.config['training']['device'])
             attention_mask = batch["attention_mask"].to(self.config['training']['device'])
             labels = batch["labels"].to(self.config['training']['device'])
@@ -261,118 +243,80 @@ class Trainer:
             # Specify the device type for autocast
             device_type = 'cuda' if self.config['training']['device'] == 'cuda' else 'cpu'
 
-            with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
-                outputs = self.model(inputs, attention_mask=attention_mask)
-                loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
-                loss = loss / self.gradient_accumulation_steps
+        with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
+            outputs = self.model(inputs, attention_mask=attention_mask)
+            loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
+            loss = loss / self.gradient_accumulation_steps
 
-            total_loss += loss.item()
-            progress_bar.set_postfix(loss=f"{loss.item():.4f}")
+        total_loss += loss.item()
+        progress_bar.set_postfix(loss=loss.item())
 
-            # Backward pass
-            self.scaler.scale(loss).backward()
+        # Backward pass
+        self.scaler.scale(loss).backward()
 
-            # Gradient accumulation step
-            if (batch_idx + 1) % self.gradient_accumulation_steps == 0 or (batch_idx + 1) == len(self.train_loader):
-                self.scaler.unscale_(self.optimizer)
-                clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
+        # Gradient accumulation step
+        if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+            self.scaler.unscale_(self.optimizer)
+            clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.scheduler.step()
+            self.optimizer.zero_grad()
 
-            # Log to W&B
-            if self.use_wandb:
-                self._log_gradients_and_activations()
-                wandb.log({
-                    "model": "LuminaLM",
-                    "train_loss": loss.item(),
-                    "lr": self.scheduler.get_last_lr()[0]
-                })
+        # Log to W&B
+        if self.use_wandb:
+            self._log_gradients_and_activations()
+            wandb.log({
+                "model": "LuminaLM",
+                "train_loss": loss.item(),
+                "lr": self.scheduler.get_last_lr()[0]
+            })
 
         avg_loss = total_loss / len(self.train_loader)
         train_perplexity = self._calculate_perplexity(avg_loss)
         self.logger.info(f"LuminaLM Epoch {epoch + 1} Training Loss: {avg_loss:.4f}, Perplexity: {train_perplexity:.2f}")
         return avg_loss, train_perplexity
-        
+
+
     @torch.no_grad()
     def validate(self, epoch: int):
-        """
-        Validate the model on the validation dataset.
-        Args:
-            epoch (int): Current epoch number
-        Returns:
-            tuple: Average validation loss and perplexity
-        """
         self.model.eval()
         total_loss = 0
-        num_batches = len(self.val_loader)
-        self.logger.info(f"Validation batches per epoch: {num_batches}")
-        progress_bar = tqdm(self.val_loader, total=num_batches, desc=f"LuminaLM Validation Epoch {epoch + 1}")
+        progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
 
-        device = self.config['training']['device']
-        
-        try:
-            for batch in progress_bar:
-                # Validate batch structure
-                if not isinstance(batch, dict) or not all(k in batch for k in ["input_ids", "attention_mask", "labels"]):
-                    self.logger.error(f"Batch: Invalid structure: {batch.keys() if isinstance(batch, dict) else type(batch)}")
-                    continue
-
-                # Move data to device efficiently
-                try:
-                    inputs = {
-                        "input_ids": batch["input_ids"].to(device, non_blocking=True),
-                        "attention_mask": batch["attention_mask"].to(device, non_blocking=True)
-                    }
-                    labels = batch["labels"].to(device, non_blocking=True)
-                except RuntimeError as e:
-                    self.logger.error(f"Device transfer failed: {str(e)}")
-                    continue
-
-                # Forward pass with error handling
-                try:
-                    outputs = self.model(**inputs)
-                    loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
-                    total_loss += loss.item()
-
-                    # Update progress bar
-                    progress_bar.set_postfix({"val_loss": f"{loss.item():.4f}"})
-
-                except RuntimeError as e:
-                    self.logger.error(f"Forward pass failed: {str(e)}")
-                    continue
-
-                # Optional: Log memory usage
-                if hasattr(self, 'memory_monitor'):
-                    self.logger.debug(f"Validation Step: {self.memory_monitor.get_memory_usage()}")
-
-            # Calculate final metrics
-            avg_loss = total_loss / num_batches if num_batches > 0 else float("inf")
-            val_perplexity = self._calculate_perplexity(avg_loss)
-
-            # Log results
-            self.logger.info(
-                f"LuminaLM Epoch {epoch + 1} "
-                f"Validation Loss: {avg_loss:.4f}, "
-                f"Perplexity: {val_perplexity:.2f}"
+        for batch in progress_bar:
+            inputs, attention_mask, labels = batch
+            inputs, attention_mask, labels = (
+                inputs.to(self.config['training']['device']),
+                attention_mask.to(self.config['training']['device']),
+                labels.to(self.config['training']['device'])
             )
 
-            # Log to W&B if enabled
-            if self.use_wandb:
-                wandb.log({
-                    "val_loss": avg_loss,
-                    "val_perplexity": val_perplexity,
-                    "epoch": epoch + 1
-                })
+            outputs = self.model(inputs, attention_mask=attention_mask)
+            loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
+            total_loss += loss.item()
 
-            return avg_loss, val_perplexity
+        avg_loss = total_loss / len(self.val_loader)
+        val_perplexity = self._calculate_perplexity(avg_loss)
+        self.logger.info(f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, Perplexity: {val_perplexity:.2f}")
 
-        except Exception as e:
-            self.logger.error(f"Validation failed: {str(e)}")
-            raise
+        # Log to W&B
+        if self.use_wandb:
+            wandb.log({
+                "model": "LuminaLM",
+                "val_loss": avg_loss,
+                "val_perplexity": val_perplexity
+            })
+
+        return avg_loss, val_perplexity
 
     def train(self):
+        best_val_loss = float('inf')
+        best_model_path = os.path.join(
+            self.config['training']['checkpoint_dir'], 
+            'best_LuminaLM_model.pt'
+        )
+
         for epoch in range(self.start_epoch, self.config['training']['epochs']):
             self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
             train_loss, train_perplexity = self.train_one_epoch(epoch)
@@ -383,16 +327,16 @@ class Trainer:
                 self.logger.info(f"Early stopping triggered for LuminaLM at epoch {epoch}")
                 break
 
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
                 torch.save({
                     'model_name': 'LuminaLM',
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'scheduler_state_dict': self.scheduler.state_dict(),
-                    'loss': self.best_val_loss
-                }, os.path.join(self.config['training']['checkpoint_dir'], 'best_LuminaLM_model.pt'))
+                    'loss': best_val_loss
+                }, best_model_path)
 
                 save_checkpoint(
                     self.config['training']['checkpoint_dir'],
@@ -416,7 +360,7 @@ class Trainer:
                 })
 
         self.logger.info("LuminaLM training completed.")
-        return os.path.join(self.config['training']['checkpoint_dir'], 'best_LuminaLM_model.pt')
+        return best_model_path
     
     
 def main():
