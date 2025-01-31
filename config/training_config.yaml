@@ -47,6 +47,8 @@ model:
   vocab_size: 6000  # Vocabulary size
   max_seq_len: 256  # Reduced from 512 to match model config
   use_checkpointing: true  # Enable gradient checkpointing to save memory
+  checkpointing_params:  # Add explicit checkpointing parameters
+    use_reentrant: false  # Recommended setting
   activation: "gelu"  # Activation function: "relu", "gelu", "silu"
   tie_embeddings: true  # Share embeddings between input and output tokens to reduce parameters
 
