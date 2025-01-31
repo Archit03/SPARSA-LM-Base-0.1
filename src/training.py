@@ -24,9 +24,17 @@ class ConfigurationError(Exception):
 class Trainer:
     def __init__(self, training_config: Dict, data_config: Dict):
         try:
+            # Validate configuration first
+            self._validate_config(training_config)
+            
             # Assign configurations
             self.config = training_config
             self.data_config = data_config
+
+            # Early stopping initialization
+            self.best_metric = float('inf')
+            self.stopping_counter = 0
+            self.early_stopping_patience = self.config['training'].get('early_stopping_patience', 3)
 
             # Setup logging
             self.logger = setup_logging(self.config['logging']['log_dir'], name='LuminaLM_trainer')
@@ -225,12 +233,11 @@ class Trainer:
         return self.stopping_counter >= self.early_stopping_patience
 
     def _log_gradients_and_activations(self):
-        """Log gradients and activations for debugging."""
-        for name, param in self.model.named_parameters():
-            if param.grad is not None:
-                wandb.log({f"gradient_norm/{name}": param.grad.norm().item()})
-            wandb.log({f"parameter_norm/{name}": param.norm().item()})
-            
+        """Log gradients and activations sparingly."""
+        if self.use_wandb and torch.rand(1).item() < 0.1:  # Log only 10% of steps
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    wandb.log({f"gradient_norm/{name}": param.grad.norm().item()})
 
     def train_one_epoch(self, epoch: int):
         self.model.train()
@@ -287,12 +294,9 @@ class Trainer:
         progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
 
         for batch in progress_bar:
-            inputs, attention_mask, labels = batch
-            inputs, attention_mask, labels = (
-                inputs.to(self.config['training']['device']),
-                attention_mask.to(self.config['training']['device']),
-                labels.to(self.config['training']['device'])
-            )
+            inputs = batch["input_ids"].to(self.config['training']['device'])
+            attention_mask = batch["attention_mask"].to(self.config['training']['device'])
+            labels = batch["labels"].to(self.config['training']['device'])
 
             outputs = self.model(inputs, attention_mask=attention_mask)
             loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
@@ -302,7 +306,6 @@ class Trainer:
         val_perplexity = self._calculate_perplexity(avg_loss)
         self.logger.info(f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, Perplexity: {val_perplexity:.2f}")
 
-        # Log to W&B
         if self.use_wandb:
             wandb.log({
                 "model": "LuminaLM",
@@ -313,56 +316,65 @@ class Trainer:
         return avg_loss, val_perplexity
 
     def train(self):
-        best_val_loss = float('inf')
-        best_model_path = os.path.join(
-            self.config['training']['checkpoint_dir'], 
-            'best_LuminaLM_model.pt'
-        )
+        try:
+            best_val_loss = float('inf')
+            best_model_path = os.path.join(
+                self.config['training']['checkpoint_dir'], 
+                'best_LuminaLM_model.pt'
+            )
 
-        for epoch in range(self.start_epoch, self.config['training']['epochs']):
-            self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
-            train_loss, train_perplexity = self.train_one_epoch(epoch)
-            val_loss, val_perplexity = self.validate(epoch)
+            for epoch in range(self.start_epoch, self.config['training']['epochs']):
+                try:
+                    self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
+                    train_loss, train_perplexity = self.train_one_epoch(epoch)
+                    val_loss, val_perplexity = self.validate(epoch)
 
-            # Early stopping check
-            if self._early_stopping(val_loss):
-                self.logger.info(f"Early stopping triggered for LuminaLM at epoch {epoch}")
-                break
+                    # Early stopping check
+                    if self._early_stopping(val_loss):
+                        self.logger.info(f"Early stopping triggered for LuminaLM at epoch {epoch}")
+                        break
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save({
-                    'model_name': 'LuminaLM',
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
-                    'loss': best_val_loss
-                }, best_model_path)
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        torch.save({
+                            'model_name': 'LuminaLM',
+                            'epoch': epoch,
+                            'model_state_dict': self.model.state_dict(),
+                            'optimizer_state_dict': self.optimizer.state_dict(),
+                            'scheduler_state_dict': self.scheduler.state_dict(),
+                            'loss': best_val_loss
+                        }, best_model_path)
 
-                save_checkpoint(
-                    self.config['training']['checkpoint_dir'],
-                    self.model,
-                    self.optimizer,
-                    self.scheduler,
-                    epoch,
-                    model_name='LuminaLM'
-                )
-                self.logger.info(f"Saved best LuminaLM model checkpoint at epoch {epoch + 1}")
+                        save_checkpoint(
+                            self.config['training']['checkpoint_dir'],
+                            self.model,
+                            self.optimizer,
+                            self.scheduler,
+                            epoch,
+                            model_name='LuminaLM'
+                        )
+                        self.logger.info(f"Saved best LuminaLM model checkpoint at epoch {epoch + 1}")
 
-            # Log to W&B
-            if self.use_wandb:
-                wandb.log({
-                    "model": "LuminaLM",
-                    "epoch": epoch + 1,
-                    "train_loss": train_loss,
-                    "train_perplexity": train_perplexity,
-                    "val_loss": val_loss,
-                    "val_perplexity": val_perplexity
-                })
+                    if self.use_wandb:
+                        wandb.log({
+                            "model": "LuminaLM",
+                            "epoch": epoch + 1,
+                            "train_loss": train_loss,
+                            "train_perplexity": train_perplexity,
+                            "val_loss": val_loss,
+                            "val_perplexity": val_perplexity
+                        })
 
-        self.logger.info("LuminaLM training completed.")
-        return best_model_path
+                except Exception as epoch_error:
+                    self.logger.error(f"Error in epoch {epoch}: {epoch_error}")
+                    break
+
+            self.logger.info("LuminaLM training completed.")
+            return best_model_path
+
+        except Exception as e:
+            self.logger.error(f"Training failed: {e}")
+            raise
     
     
 def main():
