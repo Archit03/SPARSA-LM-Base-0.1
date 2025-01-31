@@ -60,7 +60,9 @@ logging:
   log_gradients: true  # Log gradient norms to W&B
   log_model_weights: true  # Log model weights
   log_train_steps: true  # Log training steps
-
+  log_frequency: 100  # Log every N steps
+  gradient_logging_frequency: 1000  # Log gradients every N steps
+  
 memory_monitor:
   enabled: true  # Enable memory usage logging
   log_frequency: 10  # Log memory usage every N steps

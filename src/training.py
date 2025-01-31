@@ -201,91 +201,157 @@ class Trainer:
         )
     
     def _validate_config(self, config: Dict):
-        required_keys = ['logging', 'training', 'tokenizer', 'datasets', 'model']
-        for key in required_keys:
-           if key not in config:
-                raise ConfigurationError(f"Missing required config key: {key}")
+        """Comprehensive configuration validation."""
+        try:
+            required_nested_keys = {
+                'training': ['device', 'epochs', 'batch_size', 'learning_rate'],
+                'model': ['num_layers', 'num_heads', 'hidden_dim'],
+                'logging': ['log_dir']
+            }
 
-    # Convert learning_rate to float if it's a string
-        if isinstance(config['training']['learning_rate'], str):
+            for section, keys in required_nested_keys.items():
+                if section not in config:
+                    raise ConfigurationError(f"Missing required section: {section}")
+                for key in keys:
+                    if key not in config[section]:
+                        raise ConfigurationError(f"Missing required key '{key}' in {section} section")
+
+            # Validate and convert learning rate
             try:
                 config['training']['learning_rate'] = float(config['training']['learning_rate'])
-            except ValueError:
-                raise ConfigurationError("'learning_rate' must be a valid float value.")
+            except (ValueError, TypeError):
+                raise ConfigurationError("Invalid learning rate value")
 
-        if not isinstance(config['training']['learning_rate'], (int, float)):
-            raise ConfigurationError("'learning_rate' must be a float.")
-        if not isinstance(config['training']['batch_size'], int) or config['training']['batch_size'] <= 0:
-            raise ConfigurationError("'batch_size' must be a positive integer.")
+            # Validate device configuration
+            if 'cuda' in str(config['training']['device']) and not torch.cuda.is_available():
+                raise ConfigurationError("CUDA device specified but not available")
+
+        except Exception as e:
+            raise ConfigurationError(f"Configuration validation failed: {str(e)}")
 
     def _calculate_perplexity(self, loss):
         """Calculate perplexity from loss."""
         return torch.exp(torch.tensor(loss)).item()
 
-    def _early_stopping(self, metric):
-        """Implement early stopping mechanism."""
-        if metric < self.best_metric:
+    def _early_stopping(self, metric: float, restore_best: bool = True) -> bool:
+        """Enhanced early stopping with best model restoration."""
+        if self.best_metric is None or metric < self.best_metric:
             self.best_metric = metric
             self.stopping_counter = 0
+            self.best_model_state = {
+                key: value.cpu().clone() for key, value in self.model.state_dict().items()
+            }
         else:
             self.stopping_counter += 1
 
-        return self.stopping_counter >= self.early_stopping_patience
+        if self.stopping_counter >= self.early_stopping_patience:
+            if restore_best and hasattr(self, 'best_model_state'):
+                self.model.load_state_dict(self.best_model_state)
+                self.logger.info("Restored best model state for early stopping")
+            return True
+        return False
 
-    def _log_gradients_and_activations(self):
-        """Log gradients and activations sparingly."""
-        if self.use_wandb and torch.rand(1).item() < 0.1:  # Log only 10% of steps
+    def _log_training_metrics(self, loss: float, step: int, epoch: int):
+        """Structured logging of training metrics."""
+        if not self.use_wandb:
+            return
+
+        metrics = {
+            "model": "LuminaLM",
+            "train_loss": loss,
+            "learning_rate": self.scheduler.get_last_lr()[0],
+            "epoch": epoch,
+            "step": step,
+            "memory_allocated": torch.cuda.memory_allocated() if torch.cuda.is_available() else 0,
+            "memory_reserved": torch.cuda.memory_reserved() if torch.cuda.is_available() else 0
+        }
+
+        # Log gradients with controlled frequency
+        if step % self.config['logging'].get('gradient_logging_frequency', 1000) == 0:
             for name, param in self.model.named_parameters():
                 if param.grad is not None:
-                    wandb.log({f"gradient_norm/{name}": param.grad.norm().item()})
+                    metrics[f"gradient_norm/{name}"] = param.grad.norm().item()
+
+        wandb.log(metrics)
 
     def train_one_epoch(self, epoch: int):
         self.model.train()
         total_loss = 0
+        accumulated_loss = 0
         progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch + 1}")
 
-        for step, batch in enumerate(progress_bar):
-            inputs = batch["input_ids"].to(self.config['training']['device'])
-            attention_mask = batch["attention_mask"].to(self.config['training']['device'])
-            labels = batch["labels"].to(self.config['training']['device'])
+        try:
+            for step, batch in enumerate(progress_bar):
+                # Move batch to appropriate device
+                inputs = batch["input_ids"].to(self.config['training']['device'])
+                attention_mask = batch["attention_mask"].to(self.config['training']['device'])
+                labels = batch["labels"].to(self.config['training']['device'])
 
-            # Specify the device type for autocast
-            device_type = 'cuda' if self.config['training']['device'] == 'cuda' else 'cpu'
+                # Determine device type safely
+                if torch.cuda.is_available() and 'cuda' in str(self.config['training']['device']):
+                    device_type = 'cuda'
+                elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                    device_type = 'mps'
+                else:
+                    device_type = 'cpu'
 
-        with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
-            outputs = self.model(inputs, attention_mask=attention_mask)
-            loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
-            loss = loss / self.gradient_accumulation_steps
+                # Forward pass with autocast
+                with autocast(device_type=device_type, enabled=self.config['training'].get('use_mixed_precision', True)):
+                    outputs = self.model(inputs, attention_mask=attention_mask)
+                    loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
+                    loss = loss / self.gradient_accumulation_steps
 
-        total_loss += loss.item()
-        progress_bar.set_postfix(loss=loss.item())
+                # Accumulate loss for logging
+                accumulated_loss += loss.item()
 
-        # Backward pass
-        self.scaler.scale(loss).backward()
+                # Backward pass with gradient accumulation
+                self.scaler.scale(loss).backward()
 
-        # Gradient accumulation step
-        if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
-            self.scaler.unscale_(self.optimizer)
-            clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.scheduler.step()
-            self.optimizer.zero_grad()
+                # Update weights when gradient accumulation is complete
+                if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+                    try:
+                        # Unscale gradients for clipping
+                        self.scaler.unscale_(self.optimizer)
+                        
+                        # Clip gradients
+                        clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
+                        
+                        # Optimizer step
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                        self.scheduler.step()
+                        self.optimizer.zero_grad(set_to_none=True)  # More memory efficient
 
-        # Log to W&B
-        if self.use_wandb:
-            self._log_gradients_and_activations()
-            wandb.log({
-                "model": "LuminaLM",
-                "train_loss": loss.item(),
-                "lr": self.scheduler.get_last_lr()[0]
-            })
+                        # Update total loss and reset accumulation
+                        total_loss += accumulated_loss
+                        accumulated_loss = 0
 
-        avg_loss = total_loss / len(self.train_loader)
+                        # Update progress bar
+                        progress_bar.set_postfix(
+                            loss=loss.item() * self.gradient_accumulation_steps,
+                            lr=self.scheduler.get_last_lr()[0]
+                        )
+
+                    except RuntimeError as e:
+                        if "out of memory" in str(e):
+                            if hasattr(torch.cuda, 'empty_cache'):
+                                torch.cuda.empty_cache()
+                            self.logger.error("GPU OOM detected. Attempting to recover...")
+                            continue
+                        raise e
+
+                # Log to W&B with controlled frequency
+                if self.use_wandb and (step + 1) % self.config['logging'].get('log_frequency', 100) == 0:
+                    self._log_training_metrics(loss.item(), step, epoch)
+
+        except Exception as e:
+            self.logger.error(f"Error in training loop: {str(e)}")
+            raise
+
+        avg_loss = total_loss / (len(self.train_loader) // self.gradient_accumulation_steps)
         train_perplexity = self._calculate_perplexity(avg_loss)
-        self.logger.info(f"LuminaLM Epoch {epoch + 1} Training Loss: {avg_loss:.4f}, Perplexity: {train_perplexity:.2f}")
+        
         return avg_loss, train_perplexity
-
 
     @torch.no_grad()
     def validate(self, epoch: int):
