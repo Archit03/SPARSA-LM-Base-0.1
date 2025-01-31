@@ -104,6 +104,13 @@ class Trainer:
                 drop_last=self.config['training'].get('drop_last', False)
             )
 
+            # After initializing the data loaders, add these log statements
+            num_train_batches = len(self.train_loader)
+            num_val_batches = len(self.val_loader)
+            self.logger.info(f"Number of training batches: {num_train_batches}")
+            self.logger.info(f"Number of validation batches: {num_val_batches}")
+            self.logger.info(f"Batch size: {self.config['training']['batch_size']}")
+
             # Model configuration and initialization
             model_config = TransformerConfig(
                 d_model=self.config['model']['hidden_dim'],
@@ -243,7 +250,8 @@ class Trainer:
         self.model.train()
         total_loss = 0
         num_batches = len(self.train_loader)
-        progress_bar = tqdm(enumerate(self.train_loader), total=num_batches, desc=f"LuminaLM Training Epoch {epoch + 1}")
+        self.logger.info(f"Training batches per epoch: {num_batches}")
+        progress_bar = tqdm(self.train_loader, total=num_batches, desc=f"LuminaLM Training Epoch {epoch + 1}")
 
         for step, batch in progress_bar:
             inputs = batch["input_ids"].to(self.config['training']['device'])
@@ -303,7 +311,8 @@ class Trainer:
         self.model.eval()
         total_loss = 0
         num_batches = len(self.val_loader)
-        progress_bar = tqdm(enumerate(self.val_loader), total=num_batches, desc=f"LuminaLM Validation Epoch {epoch + 1}")
+        self.logger.info(f"Validation batches per epoch: {num_batches}")
+        progress_bar = tqdm(self.val_loader, total=num_batches, desc=f"LuminaLM Validation Epoch {epoch + 1}")
 
         device = self.config['training']['device']
         
