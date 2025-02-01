@@ -17,9 +17,11 @@ import optuna
 
 from sklearn.model_selection import train_test_split
 
+
 class ConfigurationError(Exception):
     """Custom exception for configuration-related errors."""
     pass
+
 
 class Trainer:
     def __init__(self, training_config: Dict, data_config: Dict):
@@ -46,21 +48,28 @@ class Trainer:
             # Set random seeds for reproducibility
             set_seed(self.config['training']['seed'])
 
-            # Load tokenizer
+            # -----------------------
+            # 2) Load Tokenizer
+            # -----------------------
             tokenizer_path = self.config['tokenizer']['path']
             self.tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
             if self.tokenizer.pad_token is None:
                 self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                 self.logger.info(f"Added `pad_token`: {self.tokenizer.pad_token}")
 
+            # Critical fix: ensure we know the final tokenizer size
+            actual_vocab_size = len(self.tokenizer)
+            self.logger.info(f"Tokenizer size (including added tokens): {actual_vocab_size}")
+
             # -----------------------
-            # 2) Dataset Initialization
+            # 3) Dataset Initialization
             # -----------------------
             datasets = self.data_config.get('datasets', [])
             if not isinstance(datasets, list):
                 raise ConfigurationError("'datasets' must be a list of dataset configurations.")
+
             source_dir = next(
-                (d.get('config', {}).get('source_dir') for d in datasets 
+                (d.get('config', {}).get('source_dir') for d in datasets
                  if d.get('name') == self.config['dataset']['train_dataset']),
                 None
             )
@@ -87,7 +96,7 @@ class Trainer:
             )
 
             # -----------------------
-            # 3) Data Loaders
+            # 4) Data Loaders
             # -----------------------
             self.train_loader = DataLoader(
                 dataset=self.train_dataset,
@@ -109,9 +118,11 @@ class Trainer:
             )
 
             # -----------------------
-            # 4) Model Initialization
+            # 5) Model Initialization
             # -----------------------
             checkpointing_params = self.config['model'].get('checkpointing', {})
+
+            # Overwrite the config's vocab_size with the tokenizer's actual size
             model_config = TransformerConfig(
                 d_model=self.config['model']['hidden_dim'],
                 num_heads=self.config['model']['num_heads'],
@@ -124,7 +135,7 @@ class Trainer:
                 activation=self.config['model'].get('activation', 'gelu'),
                 use_rope=self.config['model'].get('use_rope', True),
                 prenorm=self.config['model'].get('prenorm', True),
-                vocab_size=self.config['model']['vocab_size'],
+                vocab_size=actual_vocab_size,   # <--- FIX: use actual vocab size
                 tie_embeddings=self.config['model'].get('tie_embeddings', False),
                 scheduler_type=self.config['training']['scheduler_type'],
                 learning_rate=self.config['training']['learning_rate'],
@@ -137,10 +148,11 @@ class Trainer:
                 use_checkpointing=self.config['model'].get('use_checkpointing', False),
                 use_reentrant=checkpointing_params.get('use_reentrant', True)
             )
+
             self.model = Transformer(model_config).to(self.config['training']['device'])
 
             # -----------------------
-            # 5) Optimizer & Scheduler
+            # 6) Optimizer & Scheduler
             # -----------------------
             self.optimizer = self._configure_optimizer()
             num_training_steps = len(self.train_loader) * self.config['training']['epochs']
@@ -156,7 +168,7 @@ class Trainer:
             self.memory_monitor = MemoryMonitor()
 
             # -----------------------
-            # 6) Checkpoint Resume
+            # 7) Checkpoint Resume
             # -----------------------
             self.start_epoch = 0
             if self.config['training']['resume_from_checkpoint']:
@@ -172,7 +184,7 @@ class Trainer:
             self.scaler = GradScaler(enabled=self.config['training'].get('use_mixed_precision', True))
 
             # -----------------------
-            # 7) Early Stopping Attributes
+            # 8) Early Stopping Attributes
             # -----------------------
             self.stopping_counter = 0
             self.best_metric = float('inf')  # For e.g. best validation loss
@@ -211,11 +223,11 @@ class Trainer:
             betas=(0.9, 0.999),
             eps=1e-8
         )
-    
+
     def _validate_config(self, config: Dict):
         required_keys = ['logging', 'training', 'tokenizer', 'datasets', 'model']
         for key in required_keys:
-           if key not in config:
+            if key not in config:
                 raise ConfigurationError(f"Missing required config key: {key}")
 
         # Convert learning_rate to float if it's a string
@@ -265,7 +277,6 @@ class Trainer:
             attention_mask = batch["attention_mask"].to(self.config['training']['device'])
             labels = batch["labels"].to(self.config['training']['device'])
 
-            # Use autocast inside the loop (fixed indentation)
             device_type = 'cuda' if 'cuda' in self.config['training']['device'] else 'cpu'
             with autocast(device_type=device_type, 
                           enabled=self.config['training'].get('use_mixed_precision', True)):
@@ -310,7 +321,6 @@ class Trainer:
         progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
 
         for batch in progress_bar:
-            # Here we fix the dictionary usage
             inputs = batch["input_ids"].to(self.config['training']['device'])
             attention_mask = batch["attention_mask"].to(self.config['training']['device'])
             labels = batch["labels"].to(self.config['training']['device'])
@@ -337,7 +347,7 @@ class Trainer:
     def train(self):
         best_val_loss = float('inf')
         best_model_path = os.path.join(
-            self.config['training']['checkpoint_dir'], 
+            self.config['training']['checkpoint_dir'],
             'best_LuminaLM_model.pt'
         )
 
@@ -387,6 +397,7 @@ class Trainer:
         self.logger.info("LuminaLM training completed.")
         return best_model_path
 
+
 def main():
     """Main function to run the training process."""
     # Paths to the configuration files
@@ -419,6 +430,7 @@ def main():
     except Exception as e:
         logging.error(f"Training failed: {e}")
         raise
+
 
 if __name__ == "__main__":
     main()
