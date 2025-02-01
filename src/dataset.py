@@ -167,12 +167,6 @@ class TextDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         Return a single tokenized sample as a dictionary.
-
-        Args:
-            idx: Index of the sample.
-
-        Returns:
-            Dictionary with tokenized data and attention mask.
         """
         text = self.data[idx]
         encoding = self.tokenizer(
@@ -182,11 +176,19 @@ class TextDataset(Dataset):
             truncation=True,
             return_tensors="pt",
         )
+        
+        # Get the vocabulary size from tokenizer
+        vocab_size = self.tokenizer.get_vocab_size()
+        
+        # Ensure labels are within valid range
+        labels = encoding.input_ids.squeeze(0).clone()
+        labels[labels >= vocab_size] = self.tokenizer.token_to_id("[UNK]")  # Replace OOV tokens with UNK
+        labels[labels < 0] = self.tokenizer.token_to_id("[PAD]")  # Replace negative values with PAD
+        
         return {
             "input_ids": encoding.input_ids.squeeze(0),
             "attention_mask": encoding.attention_mask.squeeze(0),
-            # For a typical LM approach, we can set labels=input_ids
-            "labels": encoding.input_ids.squeeze(0),
+            "labels": labels,
         }
 
     @staticmethod

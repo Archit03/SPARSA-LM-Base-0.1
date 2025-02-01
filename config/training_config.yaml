@@ -44,7 +44,7 @@ model:
   hidden_dim: 64  # Reduced from 128
   ff_dim: 256  # Reduced from 512
   dropout: 0.1  # Dropout rate
-  vocab_size: 6001  # Vocabulary size
+  vocab_size: 6000  # Vocabulary size
   max_seq_len: 256  # Reduced from 512 to match model config
   use_checkpointing: true  # Enable gradient checkpointing to save memory
   checkpointing_params:  # Add explicit checkpointing parameters

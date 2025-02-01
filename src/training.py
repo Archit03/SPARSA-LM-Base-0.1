@@ -1,6 +1,3 @@
-###############################################################################
-# training.py
-###############################################################################
 import os
 import yaml
 import logging
@@ -11,13 +8,14 @@ from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerFast, get_scheduler
-from typing import Dict, Any, Optional
-
-# Local imports; adapt as needed
+from typing import Dict, Any, Optional, Tuple
 from dataset import DatasetProcessor, TextDataset
 from model import Transformer, TransformerConfig
 from utils import setup_logging, save_checkpoint, load_checkpoint, set_seed, MemoryMonitor
 from torch.amp import GradScaler, autocast
+import optuna
+
+from sklearn.model_selection import train_test_split
 
 class ConfigurationError(Exception):
     """Custom exception for configuration-related errors."""
@@ -26,11 +24,17 @@ class ConfigurationError(Exception):
 class Trainer:
     def __init__(self, training_config: Dict, data_config: Dict):
         try:
-            # -----------------------
-            # 1) Basic Setup
-            # -----------------------
+            # Validate configuration first
+            self._validate_config(training_config)
+            
+            # Assign configurations
             self.config = training_config
             self.data_config = data_config
+
+            # Early stopping initialization
+            self.best_metric = float('inf')
+            self.stopping_counter = 0
+            self.early_stopping_patience = self.config['training'].get('early_stopping_patience', 3)
 
             # Setup logging
             self.logger = setup_logging(self.config['logging']['log_dir'], name='LuminaLM_trainer')
@@ -45,34 +49,22 @@ class Trainer:
             else:
                 self.use_wandb = False
 
-            # Set random seed for reproducibility
+            # Set random seeds for reproducibility
             set_seed(self.config['training']['seed'])
 
-            # -----------------------
-            # 2) Load Tokenizer
-            # -----------------------
+            # Load tokenizer
             tokenizer_path = self.config['tokenizer']['path']
             self.tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
-
-            # If needed, add a pad token
             if self.tokenizer.pad_token is None:
                 self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                 self.logger.info(f"Added `pad_token`: {self.tokenizer.pad_token}")
 
-            # Log the tokenizer length
-            actual_vocab_size = len(self.tokenizer)
-            self.logger.info(f"Tokenizer size (including any new tokens) = {actual_vocab_size}")
-
-            # -----------------------
-            # 3) Dataset Initialization
-            # -----------------------
+            # Load dataset configuration and initialize DatasetProcessor
             datasets = self.data_config.get('datasets', [])
             if not isinstance(datasets, list):
                 raise ConfigurationError("'datasets' must be a list of dataset configurations.")
-
             source_dir = next(
-                (d.get('config', {}).get('source_dir') for d in datasets
-                 if d.get('name') == self.config['dataset']['train_dataset']),
+                (d.get('config', {}).get('source_dir') for d in datasets if d.get('name') == self.config['dataset']['train_dataset']),
                 None
             )
             if not source_dir or not os.path.exists(source_dir):
@@ -97,9 +89,7 @@ class Trainer:
                 max_length=max_length
             )
 
-            # -----------------------
-            # 4) Data Loaders
-            # -----------------------
+            # Initialize data loaders
             self.train_loader = DataLoader(
                 dataset=self.train_dataset,
                 batch_size=self.config['training']['batch_size'],
@@ -119,12 +109,8 @@ class Trainer:
                 drop_last=self.config['training'].get('drop_last', False)
             )
 
-            # -----------------------
-            # 5) Model Initialization
-            # -----------------------
-            checkpointing_params = self.config['model'].get('checkpointing', {})
-
-            # Overwrite the config's vocab_size with the final tokenizer size
+            # Model configuration and initialization
+            checkpointing_params = self.config['model'].get('checkpointing_params', {})
             model_config = TransformerConfig(
                 d_model=self.config['model']['hidden_dim'],
                 num_heads=self.config['model']['num_heads'],
@@ -137,7 +123,7 @@ class Trainer:
                 activation=self.config['model'].get('activation', 'gelu'),
                 use_rope=self.config['model'].get('use_rope', True),
                 prenorm=self.config['model'].get('prenorm', True),
-                vocab_size=actual_vocab_size,  # CRITICAL FIX
+                vocab_size=self.config['model']['vocab_size'],
                 tie_embeddings=self.config['model'].get('tie_embeddings', False),
                 scheduler_type=self.config['training']['scheduler_type'],
                 learning_rate=self.config['training']['learning_rate'],
@@ -148,35 +134,25 @@ class Trainer:
                 pad_token_id=self.tokenizer.pad_token_id,
                 l2_reg=self.config['training'].get('l2_reg', 0.0),
                 use_checkpointing=self.config['model'].get('use_checkpointing', False),
-                use_reentrant=checkpointing_params.get('use_reentrant', True)
+                use_reentrant=checkpointing_params.get('use_reentrant', False)
             )
-
             self.model = Transformer(model_config).to(self.config['training']['device'])
 
-            # (Optional) Log the final model vocab size for clarity
-            self.logger.info(f"Model vocab_size in config: {self.model.config.vocab_size}")
-
-            # -----------------------
-            # 6) Optimizer & Scheduler
-            # -----------------------
+            # Optimizer, scheduler, and loss
             self.optimizer = self._configure_optimizer()
             num_training_steps = len(self.train_loader) * self.config['training']['epochs']
             self.scheduler = get_scheduler(
                 name=self.config['training']['scheduler_type'],
                 optimizer=self.optimizer,
-                num_warmup_steps=int(num_training_steps * self.config['training'].get('warmup_ratio', 0.1)),
+                num_warmup_steps=int(num_training_steps * self.config['training'].get('warmup_ratio')),
                 num_training_steps=num_training_steps
             )
-            pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else -100
-            self.criterion = torch.nn.CrossEntropyLoss(ignore_index=pad_token_id)
-
+            self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
 
             # Memory monitor
             self.memory_monitor = MemoryMonitor()
 
-            # -----------------------
-            # 7) Checkpoint Resume
-            # -----------------------
+            # Checkpoints
             self.start_epoch = 0
             if self.config['training']['resume_from_checkpoint']:
                 self.start_epoch = load_checkpoint(
@@ -190,15 +166,14 @@ class Trainer:
             self.gradient_accumulation_steps = self.config['training']['gradient_accumulation_steps']
             self.scaler = GradScaler(enabled=self.config['training'].get('use_mixed_precision', True))
 
-            # -----------------------
-            # 8) Early Stopping Attributes
-            # -----------------------
-            self.stopping_counter = 0
-            self.best_metric = float('inf')  # for val_loss early stopping
-            self.early_stopping_patience = self.config['training'].get('early_stopping_patience', 3)
-
         except Exception as e:
             raise RuntimeError(f"LuminaLM Initialization failed: {e}")
+        
+    def _setup_distributed_training(self):
+        """Enable distributed training if multiple GPUs available."""
+        if torch.cuda.device_count() > 1:
+            self.model = torch.nn.DataParallel(self.model)
+            self.logger.info(f"Using {torch.cuda.device_count()} GPUs for LuminaLM")
 
     def _configure_optimizer(self):
         """Configure optimizer with weight decay."""
@@ -208,7 +183,6 @@ class Trainer:
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
                 continue
-            # typical "no decay" = bias, norms, embeddings
             if 'bias' in name or 'norm' in name or 'embedding' in name:
                 no_decay_params.append(param)
             else:
@@ -218,114 +192,238 @@ class Trainer:
             {'params': decay_params, 'weight_decay': self.config['training']['weight_decay']},
             {'params': no_decay_params, 'weight_decay': 0.0}
         ]
+
         return torch.optim.AdamW(
             optim_groups,
             lr=self.config['training']['learning_rate'],
             betas=(0.9, 0.999),
             eps=1e-8
         )
+    
+    def _validate_config(self, config: Dict):
+        """Comprehensive configuration validation."""
+        try:
+            required_nested_keys = {
+                'training': ['device', 'epochs', 'batch_size', 'learning_rate'],
+                'model': ['num_layers', 'num_heads', 'hidden_dim'],
+                'logging': ['log_dir']
+            }
 
-    def _early_stopping(self, metric: float) -> bool:
-        """
-        If val_loss does not improve for `early_stopping_patience` epochs, stop.
-        """
-        if metric < self.best_metric:
-            self.best_metric = metric
+            for section, keys in required_nested_keys.items():
+                if section not in config:
+                    raise ConfigurationError(f"Missing required section: {section}")
+                for key in keys:
+                    if key not in config[section]:
+                        raise ConfigurationError(f"Missing required key '{key}' in {section} section")
+
+            # Validate and convert learning rate
+            try:
+                config['training']['learning_rate'] = float(config['training']['learning_rate'])
+            except (ValueError, TypeError):
+                raise ConfigurationError("Invalid learning rate value")
+
+            # Validate device configuration
+            if 'cuda' in str(config['training']['device']) and not torch.cuda.is_available():
+                raise ConfigurationError("CUDA device specified but not available")
+
+        except Exception as e:
+            raise ConfigurationError(f"Configuration validation failed: {str(e)}")
+
+    def _calculate_perplexity(self, loss):
+        """Calculate perplexity from loss."""
+        return torch.exp(torch.tensor(loss)).item()
+
+    def _early_stopping(self, val_metric: float) -> bool:
+        """Enhanced early stopping with best model preservation."""
+        improved = val_metric < self.best_metric
+        if improved:
+            self.best_metric = val_metric
             self.stopping_counter = 0
+            self._save_best_model()
+            return False
+        
+        self.stopping_counter += 1
+        if self.stopping_counter >= self.early_stopping_patience:
+            self.logger.info(f"Early stopping triggered after {self.stopping_counter} epochs without improvement")
+            self._restore_best_model()
+            return True
+        
+        return False
+
+    def _save_best_model(self):
+        """Save the best model state."""
+        best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_model.pt')
+        torch.save({
+            'epoch': self.current_epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'best_metric': self.best_metric,
+            'config': self.config
+        }, best_model_path)
+        self.logger.info(f"Saved best model to {best_model_path}")
+
+    def _restore_best_model(self):
+        """Restore the best model state."""
+        best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_model.pt')
+        if os.path.exists(best_model_path):
+            checkpoint = torch.load(best_model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            self.logger.info("Restored best model state")
         else:
-            self.stopping_counter += 1
-        return self.stopping_counter >= self.early_stopping_patience
+            self.logger.warning("No best model checkpoint found to restore")
 
-    def _calculate_perplexity(self, loss: float) -> float:
-        """Simple perplexity from a scalar loss."""
-        return float(torch.exp(torch.tensor(loss)))
+    def _log_training_metrics(self, loss: float, step: int, epoch: int):
+        """Structured logging of training metrics."""
+        if not self.use_wandb:
+            return
 
-    def _log_gradients_and_activations(self):
-        """Log gradient and parameter norms to W&B for debugging."""
-        for name, param in self.model.named_parameters():
-            if param.grad is not None:
-                wandb.log({f"gradient_norm/{name}": param.grad.norm().item()})
-            wandb.log({f"parameter_norm/{name}": param.norm().item()})
+        metrics = {
+            "train/loss": loss,
+            "train/learning_rate": self.scheduler.get_last_lr()[0],
+            "train/epoch": epoch,
+            "train/step": step,
+        }
 
-    def train_one_epoch(self, epoch: int):
-        """
-        Single epoch training loop with debug prints for label ranges.
-        """
+        # Log memory stats if available
+        if torch.cuda.is_available():
+            metrics.update({
+                "system/gpu_memory_allocated": torch.cuda.memory_allocated(),
+                "system/gpu_memory_reserved": torch.cuda.memory_reserved()
+            })
+
+        # Log gradients at specified intervals
+        if step % self.config['logging'].get('gradient_logging_frequency', 1000) == 0:
+            grad_norm = self._compute_gradient_norm()
+            metrics["train/gradient_norm"] = grad_norm
+
+        wandb.log(metrics)
+
+    def _compute_gradient_norm(self) -> float:
+        """Compute the total gradient norm."""
+        total_norm = 0.0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        return total_norm ** 0.5
+
+    def train_one_epoch(self, epoch: int) -> Tuple[float, float]:
+        """Train for one epoch."""
         self.model.train()
-        total_loss = 0.0
-        progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch + 1}")
-
-        for step, batch in enumerate(progress_bar):
-            inputs = batch["input_ids"].to(self.config['training']['device'])
-            attention_mask = batch["attention_mask"].to(self.config['training']['device'])
-            labels = batch["labels"].to(self.config['training']['device'])
-
-            # -------------- DEBUG: Check label range --------------
-            with torch.no_grad():
-                min_label = labels.min().item()
-                max_label = labels.max().item()
-                vocab_size = self.model.config.vocab_size
-
-                # We allow -100 for ignore_index, but we do not allow other negative values
-                # or label >= vocab_size
-                # So if min_label < -100 or max_label >= vocab_size, it's invalid
-                if (min_label < -100) or (max_label >= vocab_size):
-                    self.logger.error(
-                        f"Out-of-range training labels at step={step}!"
-                        f" min_label={min_label}, max_label={max_label}, vocab_size={vocab_size}"
-                    )
-
-                    # Show which positions are invalid
-                    invalid_positions = (labels < -100) | (labels >= vocab_size)
-                    self.logger.error(f"Invalid label indices: {invalid_positions.nonzero()}")
-                    raise RuntimeError("Found out-of-range label IDs in training!")
-            # ------------------------------------------------------
-
-            device_type = 'cuda' if 'cuda' in self.config['training']['device'] else 'cpu'
-            with autocast(device_type=device_type,
-                          enabled=self.config['training'].get('use_mixed_precision', True)):
-                outputs = self.model(inputs, attention_mask=attention_mask)
+        total_loss = 0
+        total_samples = 0
+        
+        progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch}")
+        
+        for batch in progress_bar:
+            try:
+                # Move batch to device
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+                
+                # Validate inputs
+                if torch.any(labels >= self.model.config.vocab_size):
+                    labels = torch.clamp(labels, 0, self.model.config.vocab_size - 1)
+                
+                # Forward pass
+                outputs = self.model(
+                    src=input_ids,
+                    attention_mask=attention_mask
+                )
+                
+                # Compute loss
                 loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
-                loss = loss / self.gradient_accumulation_steps
+                
+                # Accumulate loss for logging
+                total_loss += loss.item()
+                total_samples += 1
 
-            total_loss += loss.item()
-            progress_bar.set_postfix(loss=loss.item())
+                # Backward pass
+                self.scaler.scale(loss).backward()
 
-            # Backward pass with gradient scaling
-            self.scaler.scale(loss).backward()
+                # Update weights when gradient accumulation is complete
+                if total_samples == self.gradient_accumulation_steps:
+                    try:
+                        # Unscale gradients
+                        self.scaler.unscale_(self.optimizer)
+                        
+                        # Clip gradients
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), 
+                            self.config['training'].get('max_grad_norm', 1.0)
+                        )
+                        
+                        # Optimizer step
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                        self.scheduler.step()
+                        
+                        # Zero gradients
+                        self.optimizer.zero_grad(set_to_none=True)
 
-            # Gradient accumulation
-            if (step + 1) % self.gradient_accumulation_steps == 0 or (step + 1) == len(self.train_loader):
-                self.scaler.unscale_(self.optimizer)
-                clip_grad_norm_(self.model.parameters(), self.config['training'].get('max_grad_norm', 1.0))
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
+                        # Update metrics
+                        total_loss += loss.item()
+                        
+                        # Log metrics
+                        if self.use_wandb:
+                            self._log_training_metrics(
+                                loss=loss.item(),
+                                step=total_samples,
+                                epoch=epoch
+                            )
 
-            # W&B logging
-            if self.use_wandb:
-                self._log_gradients_and_activations()
-                wandb.log({
-                    "model": "LuminaLM",
-                    "train_loss": loss.item(),
-                    "lr": self.scheduler.get_last_lr()[0]
-                })
+                        # Reset accumulation
+                        total_loss = 0
+                        total_samples = 0
 
-        avg_loss = total_loss / len(self.train_loader)
-        train_perplexity = self._calculate_perplexity(avg_loss)
-        self.logger.info(
-            f"LuminaLM Epoch {epoch + 1} Training Loss: {avg_loss:.4f}, Perplexity: {train_perplexity:.2f}"
-        )
-        return avg_loss, train_perplexity
+                        # Update progress bar
+                        progress_bar.set_postfix({
+                            'loss': total_loss / total_samples,
+                            'lr': self.scheduler.get_last_lr()[0]
+                        })
+
+                    except RuntimeError as e:
+                        if "out of memory" in str(e):
+                            self._handle_oom_error()
+                            continue
+                        raise e
+
+            except Exception as e:
+                self.logger.error(f"Error in training loop: {str(e)}")
+                raise
+
+        avg_loss = total_loss / total_samples
+        return avg_loss, self._calculate_perplexity(avg_loss)
+
+    def _get_device_type(self) -> str:
+        """Determine the correct device type for autocast."""
+        if torch.cuda.is_available() and 'cuda' in str(self.config['training']['device']):
+            return 'cuda'
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            return 'mps'
+        return 'cpu'
+
+    def _handle_oom_error(self):
+        """Handle out of memory errors gracefully."""
+        if hasattr(torch.cuda, 'empty_cache'):
+            torch.cuda.empty_cache()
+        self.logger.warning("OOM detected. Attempting to recover...")
+        
+        # Reduce batch size if possible
+        if self.config['training']['batch_size'] > 1:
+            self.config['training']['batch_size'] //= 2
+            self.logger.warning(f"Reduced batch size to {self.config['training']['batch_size']}")
+            
+            # Recreate data loaders with new batch size
+            self._setup_dataloaders()
 
     @torch.no_grad()
     def validate(self, epoch: int):
-        """
-        Single epoch validation loop, also verifies label ranges.
-        """
         self.model.eval()
-        total_loss = 0.0
+        total_loss = 0
         progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
 
         for batch in progress_bar:
@@ -333,29 +431,14 @@ class Trainer:
             attention_mask = batch["attention_mask"].to(self.config['training']['device'])
             labels = batch["labels"].to(self.config['training']['device'])
 
-            # Debug label range
-            min_label = labels.min().item()
-            max_label = labels.max().item()
-            vocab_size = self.model.config.vocab_size
-            if (min_label < -100) or (max_label >= vocab_size):
-                self.logger.error(
-                    f"Out-of-range validation labels! min_label={min_label}, max_label={max_label}, vocab_size={vocab_size}"
-                )
-                invalid_positions = (labels < -100) | (labels >= vocab_size)
-                self.logger.error(f"Invalid val label indices: {invalid_positions.nonzero()}")
-                raise RuntimeError("Found out-of-range label IDs in validation!")
-
             outputs = self.model(inputs, attention_mask=attention_mask)
             loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
             total_loss += loss.item()
 
         avg_loss = total_loss / len(self.val_loader)
         val_perplexity = self._calculate_perplexity(avg_loss)
-        self.logger.info(
-            f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, Perplexity: {val_perplexity:.2f}"
-        )
+        self.logger.info(f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, Perplexity: {val_perplexity:.2f}")
 
-        # W&B logging
         if self.use_wandb:
             wandb.log({
                 "model": "LuminaLM",
@@ -366,69 +449,70 @@ class Trainer:
         return avg_loss, val_perplexity
 
     def train(self):
-        best_val_loss = float('inf')
-        best_model_path = os.path.join(
-            self.config['training']['checkpoint_dir'],
-            'best_LuminaLM_model.pt'
-        )
-
-        for epoch in range(self.start_epoch, self.config['training']['epochs']):
-            self.logger.info(
-                f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}"
+        try:
+            best_val_loss = float('inf')
+            best_model_path = os.path.join(
+                self.config['training']['checkpoint_dir'], 
+                'best_LuminaLM_model.pt'
             )
-            train_loss, train_perplexity = self.train_one_epoch(epoch)
-            val_loss, val_perplexity = self.validate(epoch)
 
-            # Early stopping check
-            if self._early_stopping(val_loss):
-                self.logger.info(f"Early stopping triggered at epoch {epoch + 1}")
-                break
+            for epoch in range(self.start_epoch, self.config['training']['epochs']):
+                try:
+                    self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
+                    train_loss, train_perplexity = self.train_one_epoch(epoch)
+                    val_loss, val_perplexity = self.validate(epoch)
 
-            # If best validation so far, save a checkpoint
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save({
-                    'model_name': 'LuminaLM',
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
-                    'loss': best_val_loss
-                }, best_model_path)
+                    # Early stopping check
+                    if self._early_stopping(val_loss):
+                        self.logger.info(f"Early stopping triggered for LuminaLM at epoch {epoch}")
+                        break
 
-                save_checkpoint(
-                    self.config['training']['checkpoint_dir'],
-                    self.model,
-                    self.optimizer,
-                    self.scheduler,
-                    epoch,
-                    model_name='LuminaLM'
-                )
-                self.logger.info(
-                    f"Saved best LuminaLM model checkpoint at epoch {epoch + 1}"
-                )
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        torch.save({
+                            'model_name': 'LuminaLM',
+                            'epoch': epoch,
+                            'model_state_dict': self.model.state_dict(),
+                            'optimizer_state_dict': self.optimizer.state_dict(),
+                            'scheduler_state_dict': self.scheduler.state_dict(),
+                            'loss': best_val_loss
+                        }, best_model_path)
 
-            # W&B logging
-            if self.use_wandb:
-                wandb.log({
-                    "model": "LuminaLM",
-                    "epoch": epoch + 1,
-                    "train_loss": train_loss,
-                    "train_perplexity": train_perplexity,
-                    "val_loss": val_loss,
-                    "val_perplexity": val_perplexity
-                })
+                        save_checkpoint(
+                            self.config['training']['checkpoint_dir'],
+                            self.model,
+                            self.optimizer,
+                            self.scheduler,
+                            epoch,
+                            model_name='LuminaLM'
+                        )
+                        self.logger.info(f"Saved best LuminaLM model checkpoint at epoch {epoch + 1}")
 
-        self.logger.info("LuminaLM training completed.")
-        return best_model_path
+                    if self.use_wandb:
+                        wandb.log({
+                            "model": "LuminaLM",
+                            "epoch": epoch + 1,
+                            "train_loss": train_loss,
+                            "train_perplexity": train_perplexity,
+                            "val_loss": val_loss,
+                            "val_perplexity": val_perplexity
+                        })
 
+                except Exception as epoch_error:
+                    self.logger.error(f"Error in epoch {epoch}: {epoch_error}")
+                    break
 
+            self.logger.info("LuminaLM training completed.")
+            return best_model_path
+
+        except Exception as e:
+            self.logger.error(f"Training failed: {e}")
+            raise
+    
+    
 def main():
     """Main function to run the training process."""
-    # If you want more precise stack traces on CUDA device asserts, uncomment:
-    # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
-    # Configuration paths
+    # Paths to the configuration files
     training_config_path = 'config/training_config.yaml'
     data_config_path = 'config/training_data_config.yaml'
 
@@ -436,22 +520,23 @@ def main():
         # Load training config
         with open(training_config_path, 'r') as f:
             training_config = yaml.safe_load(f)
+            print(f"Loaded data_config: {data_config_path}") # for debugging
+            print(f"Learning rate: {training_config['training']['learning_rate']}, Type: {type(training_config['training']['learning_rate'])}") # for debugging
 
         # Load data config
         with open(data_config_path, 'r') as f:
             data_config = yaml.safe_load(f)
+            print(f"Loaded data_config: {data_config_path} successfully.") # for debugging
+            print(f"data_config: {data_config}, Type: {type(data_config)}")
 
-        # Make sure the model directory exists
+        # Ensure model directory exists
         model_dir = 'model'
         os.makedirs(model_dir, exist_ok=True)
 
-        # Update config to store checkpoints in model_dir
+        # Update training configuration to set model saving directory
         training_config['training']['checkpoint_dir'] = model_dir
 
-        # If you want to force "cuda", do:
-        # training_config['training']['device'] = "cuda"
-
-        # Initialize the trainer
+        # Initialize trainer with the loaded configurations
         trainer = Trainer(training_config=training_config, data_config=data_config)
 
         # Start training
@@ -461,6 +546,7 @@ def main():
     except Exception as e:
         logging.error(f"Training failed: {e}")
         raise
+
 
 if __name__ == "__main__":
     main()

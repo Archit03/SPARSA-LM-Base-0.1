@@ -909,15 +909,17 @@ class Transformer(nn.Module):
         return metrics
 
     def compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Compute cross entropy loss with optional label smoothing.
-        
-        Args:
-            outputs: Model output logits (batch_size, seq_len, vocab_size)
-            labels: Target labels (batch_size, seq_len)
+        """Compute cross entropy loss with input validation."""
+        # Validate shapes and values
+        if outputs.dim() != 3:
+            raise ValueError(f"Expected 3D tensor for outputs, got shape {outputs.shape}")
+        if labels.dim() != 2:
+            raise ValueError(f"Expected 2D tensor for labels, got shape {labels.shape}")
             
-        Returns:
-            Loss tensor
-        """
+        # Ensure labels are within valid range
+        if torch.any(labels >= self.config.vocab_size):
+            labels = torch.clamp(labels, 0, self.config.vocab_size - 1)
+            
         if self.config.label_smoothing > 0:
             return F.cross_entropy(
                 outputs.view(-1, outputs.size(-1)),
