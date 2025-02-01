@@ -80,7 +80,7 @@ class TransformerConfig:
         
         # Architecture Options
         self.prenorm = prenorm
-        self.tie_embeddings = tie_embeddings
+        self.tie_embeddings = tie_embeddings,
         
         # Training Features
         self.use_checkpointing = use_checkpointing
@@ -501,17 +501,22 @@ class EncoderBlock(nn.Module):
         use_cache: bool
         """
         # Self-attention
-        def sa_fn(_x):
-            out, next_kv = self.self_attn(_x, _x, _x, attn_mask=src_mask,
-                                          past_key_value=past_key_value,
-                                          use_cache=use_cache)
-            return out, next_kv
+        next_kv = None
+
+        def sa_sublayer(normed_x):
+            nonlocal next_kv
+            out, new_kv = self.self_attn(
+                normed_x, normed_x, normed_x, 
+                attn_mask = src_mask,
+                past_key_value=past_key_value,
+                use_cache=use_cache
+
+            )
+            next_kv = new_kv
+            return out
         
-        # We wrap the call so the residual connection only sees the "output" part
-        sa_out, next_kv = sa_fn(x)
-        x = self.self_attn_res(x, lambda _x: sa_out)  
-        
-        # Feed-forward
+        x = self.self_attn_res(x, sa_sublayer)
+
         x = self.ff_res(x, self.feed_forward)
 
         return x, next_kv
@@ -567,47 +572,49 @@ class DecoderBlock(nn.Module):
            (past_self_k, past_self_v, past_cross_k, past_cross_v) or similar
         use_cache: bool
         """
-        # Split the past key/values if given
         (past_self_k, past_self_v, past_cross_k, past_cross_v) = (None, None, None, None)
         if past_key_value is not None:
             past_self_k, past_self_v, past_cross_k, past_cross_v = past_key_value
-
-        # 1) Decoder self-attention
-        def self_attn_fn(_x):
-            out, next_self_kv = self.self_attn(
-                _x, _x, _x,
-                attn_mask=tgt_mask,
-                past_key_value=(past_self_k, past_self_v),
-                use_cache=use_cache
+        
+        # 1) Decoder self_attn (on normed_x)
+        next_self_kv = None
+        def self_attn_sublayer(normed_x):
+            nonlocal next_self_kv
+            out, new_self_kv = self.self_attn(
+                    normed_x, normed_x, normed_x,
+                    attn_mask = tgt_mask,
+                    past_key_value = (past_self_k, past_self_v),
+                    use_cache=use_cache
             )
-            return out, next_self_kv
-
-        self_sa_out, next_self_kv = self_attn_fn(x)
-        x = self.self_attn_res(x, lambda _x: self_sa_out)
-
-        # 2) Cross-attention
-        def cross_attn_fn(_x):
-            out, next_cross_kv = self.cross_attn(
-                _x,
+            next_self_kv = new_self_kv
+            return out
+        
+        x = self.self_attn_res(x, self_attn_sublayer)
+        # 2) Cross-attention (on normed_X)
+        next_cross_kv = None
+        def cross_attn_sublayer(normed_x):
+            nonlocal next_cross_kv
+            out, new_cross_kv = self.cross_attn(
+                normed_x,
                 encoder_output,
                 encoder_output,
-                attn_mask=src_mask,
-                past_key_value=(past_cross_k, past_cross_v),
-                use_cache=use_cache
+                attn_mask = src_mask,
+                past_key_value = (past_cross_k, past_cross_v),
+                use_cache = use_cache
             )
-            return out, next_cross_kv
-
-        cross_out, next_cross_kv = cross_attn_fn(x)
-        x = self.cross_attn_res(x, lambda _x: cross_out)
+            next_cross_kv = new_cross_kv
+            return out
+        x = self.cross_attn_res(x, cross_attn_sublayer)
 
         # 3) Feed-forward
         x = self.ff_res(x, self.feed_forward)
 
         next_key_value = None
         if use_cache:
-            next_key_value = (next_self_kv[0], next_self_kv[1],
-                              next_cross_kv[0], next_cross_kv[1])
-
+            next_key_value = (
+                next_self_kv[0], next_self_kv[1],
+                next_cross_kv[0], next_cross_kv[1]
+            )
         return x, next_key_value
 
 ###############################################################################
@@ -657,7 +664,7 @@ class Decoder(nn.Module):
         encoder_output, 
         tgt_mask=None, 
         src_mask=None, 
-        past_key_values=None, 
+        past_key_values = None,
         use_cache=False
     ):
         """
@@ -713,12 +720,13 @@ class Transformer(nn.Module):
         
         # Output projection
         self.generator = nn.Linear(config.d_model, config.vocab_size)
+        if config.tie_embeddings:
+            self.generator.weight = self.embedding.weight
         
         self._reset_parameters()
         
         # Training features
         self.scaler = torch.amp.GradScaler(
-            device=config.device,
             enabled=config.use_mixed_precision
         )
         self.metrics = {
@@ -734,48 +742,62 @@ class Transformer(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(
-        self,
-        src: torch.Tensor,
-        tgt: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        tgt_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
-        use_cache: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]]:
+            self, 
+            src: torch.Tensor,
+            tgt: Optional[torch.Tensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            tgt_mask: Optional[torch.Tensor] = None,
+            past_key_values: Optional[List[Tuple]] = None,
+            use_cache: bool = False
+    ):
         """
-        Forward pass of the transformer.
-        
-        Args:
-            src: Input tensor of shape (batch_size, seq_len)
-            tgt: Target tensor of shape (batch_size, tgt_seq_len)
-            attention_mask: Optional attention mask for src
-            tgt_mask: Optional mask for tgt
-            past_key_values: Optional cached key/value states for each layer
-            use_cache: Whether to return cached key/value states
-            
-        Returns:
-            If use_cache=False: output logits
-            If use_cache=True: tuple of (output logits, list of cached key/value states)
+          Args:
+            src: shape (batch_size, src_seq_len)
+            tgt: shape (batch_size, tgt_seq_len), optional
+            attention_mask: Typically a padding mask for the encoder (batch_size, src_seq_len)
+            tgt_mask: Typically a causal mask for the decoder (batch_size, tgt_seq_len, tgt_seq_len)
+            past_key_values: Optional list of cached key/value states for each layer
+            use_cache: If True, return new cache
         """
-        # Embedding + positional encoding
-        x = self.embedding(src)
+
+        # 1) Encoder the source (bidirectional, like BERT)
+        enc_inp = self.embedding(src)
         if not self.config.use_rope:
-            x = self.pos_encoding(x)
-            
-        # Encoder
-        encoder_output, next_cache = self.encoder(
-            x, 
-            attention_mask,
-            past_key_values=past_key_values if past_key_values is not None else None,
+            enc_inp = self.pos_encoding(enc_inp)
+        
+        #Pass the appropriate "past_key_values" to the encoder if using caching.
+        encoder_output, enc_past = self.encoder(
+            enc_inp,
+            src_mask = attention_mask,
+            past_key_values= past_key_values if past_key_values else None,
             use_cache=use_cache
         )
+
+        # 2) If tgt is provided, run the decoder (causal, like GPT)
+        if tgt is not None:
+            dec_inp = self.embedding(tgt)
+            if not self.config.use_rope:
+                dec_inp = self.pos_encoding(dec_inp)
+            
+            # Pass the decoder portion of past_key_values if you want caching in the decoder
+            decoder_outputs, dec_past = self.decoder(
+                dec_inp,
+                encoder_output,
+                tgt_mask = tgt_mask,
+                src_mask = attention_mask,
+                past_key_values=(past_key_values) if past_key_values else None,
+                use_cache=use_cache
+            )
+
+            logits = self.generator(decoder_outputs)
+
+            #If using cache, return both the logits and the new cache
+            if use_cache:
+                return logits, (enc_past, dec_past)
+            return logits
         
-        # Generate output
-        output = self.generator(encoder_output)
-        
-        if use_cache:
-            return output, next_cache
-        return output
+        #3) If no tgt is provided, return something for encoder-only usage.
+        return encoder_output
 
     def configure_optimizer(self, config: TransformerConfig):
         """Configure optimizer with weight decay"""

@@ -1,13 +1,14 @@
 import os
+import glob
+import logging
+import numpy as np
+import pandas as pd
 import torch
-from torch.utils.data import Dataset
+
 from tqdm import tqdm
 from typing import List, Dict, Any, Union, Iterable
-import logging
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
-import numpy as np
 
 
 class DatasetProcessor:
@@ -45,9 +46,6 @@ class DatasetProcessor:
         Returns:
             A list of loaded text data.
         """
-        import glob
-        import pandas as pd
-
         self.logger.info(f"Loading data from {self.source_dir}...")
         loaded_data = []
         patterns = self.preprocessing_config.get('patterns', ['*.txt', '*.csv'])
@@ -67,6 +65,7 @@ class DatasetProcessor:
                     self.logger.error(f"Failed to process file {file}: {e}")
 
         self.logger.info(f"Loaded {len(loaded_data)} text samples.")
+        # Strip whitespace and remove empty lines
         return [line.strip() for line in loaded_data if line.strip()]
 
     def _load_and_split_data(self):
@@ -75,19 +74,27 @@ class DatasetProcessor:
         """
         self.logger.info("Loading and splitting data...")
         self.data = self._load_source_data()
-        
+
         # Create labels for stratification based on sentence length
-        # We'll create bins of sentence lengths to avoid too many unique classes
-        sentence_lengths = [len(text.split()) for text in self.data]
-        bins = np.linspace(min(sentence_lengths), max(sentence_lengths), 10)  # 10 bins
-        labels = np.digitize(sentence_lengths, bins)
-        
+        if len(self.data) > 0:
+            sentence_lengths = [len(text.split()) for text in self.data]
+            # 10 bins between min and max length
+            min_len, max_len = min(sentence_lengths), max(sentence_lengths)
+            if min_len == max_len:
+                # Edge case: all lines have the same length
+                labels = [0] * len(sentence_lengths)
+            else:
+                bins = np.linspace(min_len, max_len, 10)
+                labels = np.digitize(sentence_lengths, bins)
+        else:
+            labels = []
+
         try:
             self.train_data, self.val_data = train_test_split(
                 self.data, 
                 test_size=self.test_size, 
                 random_state=self.random_state,
-                stratify=labels
+                stratify=labels if labels else None
             )
         except ValueError as e:
             self.logger.warning(f"Stratified split failed: {e}. Falling back to random split.")
@@ -99,6 +106,13 @@ class DatasetProcessor:
         
         self.logger.info(f"Train dataset size: {len(self.train_data)}")
         self.logger.info(f"Validation dataset size: {len(self.val_data)}")
+
+        # **Now** run any text preprocessing (lowercasing, min_length, etc.) on both splits:
+        self.train_data = self._preprocess_text(self.train_data)
+        self.val_data = self._preprocess_text(self.val_data)
+
+        self.logger.info(f"Train dataset size after preprocessing: {len(self.train_data)}")
+        self.logger.info(f"Validation dataset size after preprocessing: {len(self.val_data)}")
 
     def _preprocess_text(self, texts: Iterable[str]) -> List[str]:
         """
@@ -171,10 +185,10 @@ class TextDataset(Dataset):
         return {
             "input_ids": encoding.input_ids.squeeze(0),
             "attention_mask": encoding.attention_mask.squeeze(0),
+            # For a typical LM approach, we can set labels=input_ids
             "labels": encoding.input_ids.squeeze(0),
         }
 
-    
     @staticmethod
     def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
@@ -186,10 +200,13 @@ class TextDataset(Dataset):
         Returns:
             A dictionary of stacked tensors for each field.
         """
-        # Remove empty samples
+        # Remove any empty or None samples
         batch = [sample for sample in batch if sample is not None]
-
         if len(batch) == 0:
-            return {}  # Return empty dict instead of crashing
+            return {}
 
-        return {key: torch.stack([sample[key] for sample in batch]) for key in batch[0].keys()}
+        # Stack each field into a single tensor
+        return {
+            key: torch.stack([sample[key] for sample in batch], dim=0)
+            for key in batch[0].keys()
+        }
