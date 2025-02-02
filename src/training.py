@@ -557,7 +557,7 @@ class Trainer:
                     )
 
                     if flat_outputs is None or flat_labels is None:
-                        raise ValueError("IInvalid outputs/labels for loss calculation (debug checks failed).")
+                        raise ValueError("Invalid outputs/labels for loss calculation (debug checks failed).")
                     
                     loss = self.criterion(flat_outputs, flat_labels)
                     if torch.isnan(loss) or torch.isinf(loss):
@@ -625,8 +625,8 @@ class Trainer:
         total_loss = 0.0
         progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
         for batch in progress_bar:
-            inputs = batch["input_ids"].to(self.device)
-            attention_mask = batch["attention_mask"].to(self.device)
+            inputs = batch["encoder_input_ids"].to(self.device)
+            attention_mask = batch["encoder_attention_mask"].to(self.device)
             labels = batch["labels"].to(self.device)
 
             outputs = self.model(inputs, attention_mask=attention_mask)

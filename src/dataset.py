@@ -265,7 +265,7 @@ class TextDataset(Dataset):
         decoder_attention_mask = (decoder_input_ids != self.pad_id).long()
 
         return {
-            "encoder_input_ids": input_ids,          # 🟢 Fix: Change key from input_ids
+            "encoder_input_ids": input_ids,          #  Fix: Change key from input_ids
             "encoder_attention_mask": attention_mask,
             "decoder_input_ids": decoder_input_ids,
             "decoder_attention_mask": decoder_attention_mask,
