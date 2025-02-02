@@ -12,24 +12,32 @@ from sklearn.model_selection import train_test_split
 
 
 class DatasetProcessor:
-    def __init__(self, source_dir: str, split: Dict[str, Any], preprocessing_config: Dict[str, Any]):
+    def __init__(
+        self,
+        source_dir: str,
+        split: Dict[str, Any],
+        preprocessing_config: Dict[str, Any]
+    ):
         """
         Initialize DatasetProcessor for loading, preprocessing, and splitting data.
 
         Args:
-            source_dir: Directory containing source data.
-            split: Dictionary with keys 'test_size' and 'random_state' for splitting.
-            preprocessing_config: Configuration for preprocessing text data.
+            source_dir (str): Directory containing source data.
+            split (Dict[str, Any]): 
+                Keys 'test_size' (float) and 'random_state' (int) for splitting.
+            preprocessing_config (Dict[str, Any]): 
+                Configuration dict for how we preprocess text data.
         """
         self.source_dir = source_dir
-        self.test_size = split.get('test_size', 0.2)
-        self.random_state = split.get('random_state', 42)
+        self.test_size = split.get("test_size", 0.2)
+        self.random_state = split.get("random_state", 42)
         self.preprocessing_config = preprocessing_config
 
         self.data = []
         self.train_data = []
         self.val_data = []
 
+        # Basic logger setup
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
         logging.basicConfig(
@@ -37,53 +45,59 @@ class DatasetProcessor:
             handlers=[logging.StreamHandler()],
         )
 
+        # Load data from files and split into train/val
         self._load_and_split_data()
 
     def _load_source_data(self) -> List[str]:
         """
-        Load data from the source directory based on the defined patterns.
+        Load data from the source directory based on file patterns.
 
         Returns:
-            A list of loaded text data.
+            List[str]: A list of loaded text lines.
         """
         self.logger.info(f"Loading data from {self.source_dir}...")
         loaded_data = []
-        patterns = self.preprocessing_config.get('patterns', ['*.txt', '*.csv'])
+
+        # e.g. patterns could be ["*.txt", "*.csv"] from config
+        patterns = self.preprocessing_config.get("patterns", ["*.txt", "*.csv"])
 
         for pattern in patterns:
             files = glob.glob(os.path.join(self.source_dir, pattern))
             for file in tqdm(files, desc=f"Processing files matching {pattern}"):
                 try:
-                    if file.endswith('.csv'):
+                    if file.endswith(".csv"):
                         df = pd.read_csv(file)
-                        column = self.preprocessing_config.get('csv_text_column', 'text')
+                        column = self.preprocessing_config.get("csv_text_column", "text")
+                        # Extend with all non-null values in the specified column
                         loaded_data.extend(df[column].dropna().tolist())
                     else:
-                        with open(file, 'r', encoding='utf-8') as f:
+                        with open(file, "r", encoding="utf-8") as f:
                             loaded_data.extend(f.readlines())
                 except Exception as e:
                     self.logger.error(f"Failed to process file {file}: {e}")
 
         self.logger.info(f"Loaded {len(loaded_data)} text samples.")
-        # Strip whitespace and remove empty lines
+
+        # Strip whitespace, remove empty lines
         return [line.strip() for line in loaded_data if line.strip()]
 
     def _load_and_split_data(self):
         """
-        Load and split data into training and validation sets using stratified sampling.
+        Load all text data, then split into train/validation sets.
+        Attempt a stratified split based on sentence length distribution.
         """
         self.logger.info("Loading and splitting data...")
         self.data = self._load_source_data()
 
         # Create labels for stratification based on sentence length
         if len(self.data) > 0:
-            sentence_lengths = [len(text.split()) for text in self.data]
-            # 10 bins between min and max length
+            sentence_lengths = [len(txt.split()) for txt in self.data]
             min_len, max_len = min(sentence_lengths), max(sentence_lengths)
             if min_len == max_len:
-                # Edge case: all lines have the same length
+                # All lines have the same length -> single bin
                 labels = [0] * len(sentence_lengths)
             else:
+                # 10 bins between min and max length
                 bins = np.linspace(min_len, max_len, 10)
                 labels = np.digitize(sentence_lengths, bins)
         else:
@@ -91,23 +105,23 @@ class DatasetProcessor:
 
         try:
             self.train_data, self.val_data = train_test_split(
-                self.data, 
-                test_size=self.test_size, 
+                self.data,
+                test_size=self.test_size,
                 random_state=self.random_state,
-                stratify=labels if labels else None
+                stratify=labels if labels else None,
             )
         except ValueError as e:
             self.logger.warning(f"Stratified split failed: {e}. Falling back to random split.")
             self.train_data, self.val_data = train_test_split(
-                self.data, 
-                test_size=self.test_size, 
-                random_state=self.random_state
+                self.data,
+                test_size=self.test_size,
+                random_state=self.random_state,
             )
-        
+
         self.logger.info(f"Train dataset size: {len(self.train_data)}")
         self.logger.info(f"Validation dataset size: {len(self.val_data)}")
 
-        # **Now** run any text preprocessing (lowercasing, min_length, etc.) on both splits:
+        # Preprocess text (e.g. lowercasing, min_length checks)
         self.train_data = self._preprocess_text(self.train_data)
         self.val_data = self._preprocess_text(self.val_data)
 
@@ -116,59 +130,115 @@ class DatasetProcessor:
 
     def _preprocess_text(self, texts: Iterable[str]) -> List[str]:
         """
-        Preprocess text based on the preprocessing configuration.
+        Preprocess text according to config (lowercasing, min_length, etc.).
 
         Args:
-            texts: Iterable of raw text samples.
+            texts (Iterable[str]): Raw text samples.
 
         Returns:
-            List of preprocessed text samples.
+            List[str]: Cleaned/preprocessed text samples.
         """
         processed = []
         for text in tqdm(texts, desc="Preprocessing text data"):
             if isinstance(text, str):
                 cleaned = text.strip()
+                # Apply lowercasing if specified
                 if self.preprocessing_config.get("lowercase", False):
                     cleaned = cleaned.lower()
-                if cleaned and len(cleaned.split()) >= self.preprocessing_config.get("min_length", 1):
+
+                # Filter out lines shorter than min_length tokens
+                min_length = self.preprocessing_config.get("min_length", 1)
+                if cleaned and len(cleaned.split()) >= min_length:
                     processed.append(cleaned)
         return processed
 
     def get_train_dataset(self, tokenizer: Any, max_length: int) -> Dataset:
         """
-        Return a PyTorch Dataset for the training data.
+        Create a TextDataset for training split.
+
+        Args:
+            tokenizer (Any): A Hugging Face-compatible tokenizer.
+            max_length (int): Maximum sequence length for tokenization.
+
+        Returns:
+            TextDataset: A PyTorch Dataset object for training data.
         """
         return TextDataset(self.train_data, tokenizer, max_length)
 
     def get_val_dataset(self, tokenizer: Any, max_length: int) -> Dataset:
         """
-        Return a PyTorch Dataset for the validation data.
+        Create a TextDataset for validation split.
+
+        Args:
+            tokenizer (Any): A Hugging Face-compatible tokenizer.
+            max_length (int): Maximum sequence length for tokenization.
+
+        Returns:
+            TextDataset: A PyTorch Dataset object for validation data.
         """
         return TextDataset(self.val_data, tokenizer, max_length)
 
 
 class TextDataset(Dataset):
+    """
+    A PyTorch Dataset for an encoder-decoder model, forcing vocab size = 6000
+    and handling special tokens (PAD, UNK, BOS, EOS).
+    """
     def __init__(self, data: List[str], tokenizer: Any, max_length: int):
         """
-        Initialize a PyTorch Dataset with tokenized data.
-
         Args:
-            data: List of text samples.
-            tokenizer: Tokenizer for encoding text.
-            max_length: Maximum sequence length for tokenization.
+            data (List[str]): List of raw text samples.
+            tokenizer (Any): Custom or HF tokenizer for encoding text.
+            max_length (int): Maximum sequence length for tokenization.
         """
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
 
+        # ** Force the vocabulary size to 6000 **
+        # This ensures labels and outputs are restricted to [0..5999].
+        self.vocab_size = 6000
+        logging.info(f"TextDataset: Forcing vocab_size = {self.vocab_size}.")
+
+        # Get special token IDs from your tokenizer config
+        # If they're missing, fallback to known IDs used in your tokenizers JSON
+        self.pad_id = getattr(self.tokenizer, "pad_token_id", 0)   # [PAD] -> ID=0
+        self.unk_id = getattr(self.tokenizer, "unk_token_id", 1)   # [UNK] -> ID=1
+        self.bos_id = getattr(self.tokenizer, "bos_token_id", 5)   # [BOS] -> ID=5
+        self.eos_id = getattr(self.tokenizer, "eos_token_id", 6)   # [EOS] -> ID=6
+
+        # If anything is None, ensure we have defaults
+        if self.pad_id is None:
+            self.pad_id = 0
+        if self.unk_id is None:
+            self.unk_id = 1
+        if self.bos_id is None:
+            self.bos_id = 5
+        if self.eos_id is None:
+            self.eos_id = 6
+
+        # Log them for clarity
+        logging.info(
+            f"PAD={self.pad_id}, UNK={self.unk_id}, BOS={self.bos_id}, EOS={self.eos_id}"
+        )
+
     def __len__(self) -> int:
         return len(self.data)
-
+    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
-        Return a single tokenized sample as a dictionary.
+        Tokenizes text for encoder-decoder training, preparing source and target tensors.
+    
+        Returns a dictionary with:
+            - "encoder_input_ids": Input sequence for encoder
+            - "encoder_attention_mask": Attention mask for encoder
+            - "decoder_input_ids": Input sequence for decoder (shifted target)
+            - "decoder_attention_mask": Attention mask for decoder
+            - "labels": Target sequence for loss calculation
         """
         text = self.data[idx]
+    
+    # Tokenize input text
         encoding = self.tokenizer(
             text,
             max_length=self.max_length,
@@ -176,38 +246,41 @@ class TextDataset(Dataset):
             truncation=True,
             return_tensors="pt",
         )
-        
-        # Get the vocabulary size from tokenizer
-        vocab_size = self.tokenizer.get_vocab_size()
-        
-        # Ensure labels are within valid range
-        labels = encoding.input_ids.squeeze(0).clone()
-        labels[labels >= vocab_size] = self.tokenizer.token_to_id("[UNK]")  # Replace OOV tokens with UNK
-        labels[labels < 0] = self.tokenizer.token_to_id("[PAD]")  # Replace negative values with PAD
-        
+
+        input_ids = encoding["input_ids"].squeeze(0)          # [max_length]
+        attention_mask = encoding["attention_mask"].squeeze(0)  # [max_length]
+
+         # Create labels
+        labels = input_ids.clone()
+        labels[labels >= self.vocab_size] = self.unk_id  # Clamp invalid tokens to [UNK]
+        labels[labels < 0] = self.pad_id  # Prevent negative token IDs
+
+    # Create decoder input IDs (shifted right)
+        decoder_input_ids = torch.full(
+            (self.max_length,), self.pad_id, dtype=torch.long
+        )
+        decoder_input_ids[0] = self.bos_id  # First token = BOS
+        decoder_input_ids[1:] = input_ids[:-1]  # Shift right
+
+        decoder_attention_mask = (decoder_input_ids != self.pad_id).long()
+
         return {
-            "input_ids": encoding.input_ids.squeeze(0),
-            "attention_mask": encoding.attention_mask.squeeze(0),
+            "encoder_input_ids": input_ids,          # 🟢 Fix: Change key from input_ids
+            "encoder_attention_mask": attention_mask,
+            "decoder_input_ids": decoder_input_ids,
+            "decoder_attention_mask": decoder_attention_mask,
             "labels": labels,
         }
 
     @staticmethod
     def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
-        Collate function for batching samples in a DataLoader.
-
-        Args:
-            batch: List of encoded samples.
-
-        Returns:
-            A dictionary of stacked tensors for each field.
+        Collate function to batch samples into a single mini-batch.
         """
-        # Remove any empty or None samples
         batch = [sample for sample in batch if sample is not None]
         if len(batch) == 0:
             return {}
 
-        # Stack each field into a single tensor
         return {
             key: torch.stack([sample[key] for sample in batch], dim=0)
             for key in batch[0].keys()

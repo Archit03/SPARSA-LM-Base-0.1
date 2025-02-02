@@ -9,18 +9,145 @@ from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerFast, get_scheduler
 from typing import Dict, Any, Optional, Tuple
+
+# ----------------------------------------------------------------------
+# Import your dataset/module references:
+# ----------------------------------------------------------------------
 from dataset import DatasetProcessor, TextDataset
 from model import Transformer, TransformerConfig
 from utils import setup_logging, save_checkpoint, load_checkpoint, set_seed, MemoryMonitor
-from torch.amp import GradScaler, autocast
+from torch.amp import GradScaler
 import optuna
-
 from sklearn.model_selection import train_test_split
 
+# ----------------------------------------------------------------------
+# Debugging Utilities
+# ----------------------------------------------------------------------
+def debug_tensor_values(tensor: torch.Tensor, name: str, logger: logging.Logger) -> bool:
+    """
+    Debug helper to analyze tensor values, shape, and stats.
+    """
+    try:
+        if tensor is None:
+            logger.error(f"{name} is None")
+            return False
+        
+        stats = {
+            "shape": tensor.shape,
+            "dtype": tensor.dtype,
+            "device": str(tensor.device),
+            "min": tensor.min().item(),
+            "max": tensor.max().item(),
+            "mean": tensor.float().mean().item(),
+            "num_nan": torch.isnan(tensor).sum().item(),
+            "num_inf": torch.isinf(tensor).sum().item()
+        }
+        
+        logger.info(f"{name} stats: {stats}")
+        return True
+    except Exception as e:
+        logger.error(f"Error analyzing {name}: {e}")
+        return False
+
+def validate_model_outputs(outputs: torch.Tensor,
+                           labels: torch.Tensor,
+                           vocab_size: int,
+                           logger: logging.Logger) -> bool:
+    """
+    Validate model outputs and labels before loss calculation.
+    """
+    try:
+        # 1. Dimension check: outputs should be [batch_size, seq_len, vocab_size]
+        #    labels should be [batch_size, seq_len] if not flattened yet.
+        #    Alternatively, if using flattened shapes, you must adjust accordingly.
+        
+        # If you're flattening them after you get them from the model,
+        # check the dimension difference (outputs dim = labels dim + 1).
+        if outputs.dim() != labels.dim() + 1:
+            logger.error(f"Dimension mismatch: outputs={outputs.shape}, labels={labels.shape}")
+            return False
+        
+        # 2. Check overall stats for outputs & labels
+        if not debug_tensor_values(outputs, "outputs", logger):
+            return False
+        if not debug_tensor_values(labels, "labels", logger):
+            return False
+        
+        # 3. Validate label values against vocab_size
+        flat_labels = labels.view(-1)
+        # Typically, -100 is used for ignore_index in CrossEntropyLoss
+        # So the only valid range is: [0, vocab_size - 1] or exactly -100
+        invalid_labels = (flat_labels >= vocab_size) & (flat_labels != -100)
+        if invalid_labels.any():
+            invalid_indices = torch.where(invalid_labels)[0]
+            invalid_values = flat_labels[invalid_labels]
+            logger.error(f"Invalid label values (>= vocab_size): {invalid_values.cpu().tolist()}")
+            logger.error(f"Positions with invalid values: {invalid_indices.cpu().tolist()}")
+            logger.error(f"Vocabulary size: {vocab_size}")
+            return False
+        
+        # 4. Check for negative labels other than -100
+        negative_labels = (flat_labels < 0) & (flat_labels != -100)
+        if negative_labels.any():
+            neg_indices = torch.where(negative_labels)[0]
+            neg_values = flat_labels[negative_labels]
+            logger.error(f"Negative label values (not -100): {neg_values.cpu().tolist()}")
+            logger.error(f"Positions with negative values: {neg_indices.cpu().tolist()}")
+            return False
+        
+        return True
+    except Exception as e:
+        logger.error(f"Validation error: {e}")
+        return False
+
+def debug_loss_inputs(outputs: torch.Tensor,
+                      labels: torch.Tensor,
+                      vocab_size: int,
+                      logger: logging.Logger) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """
+    Prepare and validate inputs for loss calculation by flattening
+    and checking dimension / range correctness.
+    """
+    try:
+        # Flatten the outputs to [batch_size*seq_len, vocab_size]
+        # Flatten labels to [batch_size*seq_len]
+        flat_outputs = outputs.view(-1, outputs.size(-1))
+        flat_labels = labels.view(-1)
+        
+        # Basic shape checks
+        if flat_outputs.size(0) != flat_labels.size(0):
+            logger.error(
+                f"Size mismatch after flattening: "
+                f"outputs={flat_outputs.shape}, labels={flat_labels.shape}"
+            )
+            return None, None
+        
+        if flat_outputs.size(1) != vocab_size:
+            logger.error(
+                f"Output size mismatch: got {flat_outputs.size(1)}, "
+                f"expected {vocab_size} (check model vocab_size or tokenizer vocab_size)."
+            )
+            return None, None
+        
+        # Validate the combined shapes and value ranges
+        if not validate_model_outputs(flat_outputs, flat_labels, vocab_size, logger):
+            return None, None
+        
+        return flat_outputs, flat_labels
+    except Exception as e:
+        logger.error(f"Error in debug_loss_inputs: {e}")
+        return None, None
+
+# ----------------------------------------------------------------------
+# Additional Classes/Exceptions
+# ----------------------------------------------------------------------
 class ConfigurationError(Exception):
     """Custom exception for configuration-related errors."""
     pass
 
+# ----------------------------------------------------------------------
+# Trainer Class
+# ----------------------------------------------------------------------
 class Trainer:
     def __init__(self, training_config: Dict, data_config: Dict):
         try:
@@ -63,8 +190,10 @@ class Trainer:
             datasets = self.data_config.get('datasets', [])
             if not isinstance(datasets, list):
                 raise ConfigurationError("'datasets' must be a list of dataset configurations.")
+            
             source_dir = next(
-                (d.get('config', {}).get('source_dir') for d in datasets if d.get('name') == self.config['dataset']['train_dataset']),
+                (d.get('config', {}).get('source_dir') for d in datasets
+                 if d.get('name') == self.config['dataset']['train_dataset']),
                 None
             )
             if not source_dir or not os.path.exists(source_dir):
@@ -72,6 +201,7 @@ class Trainer:
 
             split_config = self.config['dataset'].get('split', {'test_size': 0.2, 'random_state': 42})
             preprocessing_config = self.config['dataset'].get('preprocessing', {})
+
             self.dataset_processor = DatasetProcessor(
                 source_dir=source_dir,
                 split=split_config,
@@ -166,17 +296,24 @@ class Trainer:
             self.gradient_accumulation_steps = self.config['training']['gradient_accumulation_steps']
             self.scaler = GradScaler(enabled=self.config['training'].get('use_mixed_precision', True))
 
+            # Handy short references
+            self.device = self.config['training']['device']
+            
         except Exception as e:
             raise RuntimeError(f"LuminaLM Initialization failed: {e}")
         
     def _setup_distributed_training(self):
-        """Enable distributed training if multiple GPUs available."""
+        """
+        Enable distributed training if multiple GPUs are available.
+        """
         if torch.cuda.device_count() > 1:
             self.model = torch.nn.DataParallel(self.model)
             self.logger.info(f"Using {torch.cuda.device_count()} GPUs for LuminaLM")
 
-    def _configure_optimizer(self):
-        """Configure optimizer with weight decay."""
+    def _configure_optimizer(self) -> torch.optim.Optimizer:
+        """
+        Configure optimizer with weight decay for certain parameter groups.
+        """
         decay_params = []
         no_decay_params = []
 
@@ -189,19 +326,28 @@ class Trainer:
                 decay_params.append(param)
 
         optim_groups = [
-            {'params': decay_params, 'weight_decay': self.config['training']['weight_decay']},
-            {'params': no_decay_params, 'weight_decay': 0.0}
+            {
+                'params': decay_params,
+                'weight_decay': self.config['training']['weight_decay']
+            },
+            {
+                'params': no_decay_params,
+                'weight_decay': 0.0
+            }
         ]
 
-        return torch.optim.AdamW(
+        optimizer = torch.optim.AdamW(
             optim_groups,
             lr=self.config['training']['learning_rate'],
             betas=(0.9, 0.999),
             eps=1e-8
         )
+        return optimizer
     
     def _validate_config(self, config: Dict):
-        """Comprehensive configuration validation."""
+        """
+        Comprehensive configuration validation to ensure required keys exist.
+        """
         try:
             required_nested_keys = {
                 'training': ['device', 'epochs', 'batch_size', 'learning_rate'],
@@ -229,32 +375,42 @@ class Trainer:
         except Exception as e:
             raise ConfigurationError(f"Configuration validation failed: {str(e)}")
 
-    def _calculate_perplexity(self, loss):
-        """Calculate perplexity from loss."""
-        return torch.exp(torch.tensor(loss)).item()
+    def _calculate_perplexity(self, loss: float) -> float:
+        """
+        Calculate perplexity from a scalar loss value.
+        """
+        # Because exp(loss) can overflow, we wrap it in float().
+        return float(torch.exp(torch.tensor(loss)))
 
     def _early_stopping(self, val_metric: float) -> bool:
-        """Enhanced early stopping with best model preservation."""
+        """
+        Enhanced early stopping with best model preservation.
+        """
         improved = val_metric < self.best_metric
         if improved:
             self.best_metric = val_metric
             self.stopping_counter = 0
             self._save_best_model()
             return False
+        else:
+            self.stopping_counter += 1
         
-        self.stopping_counter += 1
         if self.stopping_counter >= self.early_stopping_patience:
-            self.logger.info(f"Early stopping triggered after {self.stopping_counter} epochs without improvement")
+            self.logger.info(
+                f"Early stopping triggered after {self.stopping_counter} epochs without improvement"
+            )
             self._restore_best_model()
             return True
         
         return False
 
     def _save_best_model(self):
-        """Save the best model state."""
+        """
+        Save the best model state to disk.
+        """
         best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_model.pt')
         torch.save({
-            'epoch': self.current_epoch,
+            'epoch': self.start_epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
@@ -264,7 +420,9 @@ class Trainer:
         self.logger.info(f"Saved best model to {best_model_path}")
 
     def _restore_best_model(self):
-        """Restore the best model state."""
+        """
+        Restore the best model state from disk.
+        """
         best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_model.pt')
         if os.path.exists(best_model_path):
             checkpoint = torch.load(best_model_path, map_location=self.device)
@@ -276,10 +434,12 @@ class Trainer:
             self.logger.warning("No best model checkpoint found to restore")
 
     def _log_training_metrics(self, loss: float, step: int, epoch: int):
-        """Structured logging of training metrics."""
+        """
+        Structured logging of training metrics to W&B.
+        """
         if not self.use_wandb:
             return
-
+        
         metrics = {
             "train/loss": loss,
             "train/learning_rate": self.scheduler.get_last_lr()[0],
@@ -287,157 +447,204 @@ class Trainer:
             "train/step": step,
         }
 
-        # Log memory stats if available
+        # Log memory stats if on GPU
         if torch.cuda.is_available():
             metrics.update({
                 "system/gpu_memory_allocated": torch.cuda.memory_allocated(),
                 "system/gpu_memory_reserved": torch.cuda.memory_reserved()
             })
 
-        # Log gradients at specified intervals
-        if step % self.config['logging'].get('gradient_logging_frequency', 1000) == 0:
-            grad_norm = self._compute_gradient_norm()
-            metrics["train/gradient_norm"] = grad_norm
-
         wandb.log(metrics)
 
     def _compute_gradient_norm(self) -> float:
-        """Compute the total gradient norm."""
+        """
+        Compute the total gradient norm for debugging or logging.
+        """
         total_norm = 0.0
         for p in self.model.parameters():
             if p.grad is not None:
-                total_norm += p.grad.data.norm(2).item() ** 2
+                param_norm = p.grad.data.norm(2).item()
+                total_norm += param_norm ** 2
         return total_norm ** 0.5
 
-    def train_one_epoch(self, epoch: int) -> Tuple[float, float]:
-        """Train for one epoch."""
-        self.model.train()
-        total_loss = 0
-        total_samples = 0
-        
-        progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch}")
-        
-        for batch in progress_bar:
-            try:
-                # Move batch to device
-                input_ids = batch['input_ids'].to(self.device)
-                attention_mask = batch['attention_mask'].to(self.device)
-                labels = batch['labels'].to(self.device)
-                
-                # Validate inputs
-                if torch.any(labels >= self.model.config.vocab_size):
-                    labels = torch.clamp(labels, 0, self.model.config.vocab_size - 1)
-                
-                # Forward pass
-                outputs = self.model(
-                    src=input_ids,
-                    attention_mask=attention_mask
-                )
-                
-                # Compute loss
-                loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
-                
-                # Accumulate loss for logging
-                total_loss += loss.item()
-                total_samples += 1
-
-                # Backward pass
-                self.scaler.scale(loss).backward()
-
-                # Update weights when gradient accumulation is complete
-                if total_samples == self.gradient_accumulation_steps:
-                    try:
-                        # Unscale gradients
-                        self.scaler.unscale_(self.optimizer)
-                        
-                        # Clip gradients
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), 
-                            self.config['training'].get('max_grad_norm', 1.0)
-                        )
-                        
-                        # Optimizer step
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        self.scheduler.step()
-                        
-                        # Zero gradients
-                        self.optimizer.zero_grad(set_to_none=True)
-
-                        # Update metrics
-                        total_loss += loss.item()
-                        
-                        # Log metrics
-                        if self.use_wandb:
-                            self._log_training_metrics(
-                                loss=loss.item(),
-                                step=total_samples,
-                                epoch=epoch
-                            )
-
-                        # Reset accumulation
-                        total_loss = 0
-                        total_samples = 0
-
-                        # Update progress bar
-                        progress_bar.set_postfix({
-                            'loss': total_loss / total_samples,
-                            'lr': self.scheduler.get_last_lr()[0]
-                        })
-
-                    except RuntimeError as e:
-                        if "out of memory" in str(e):
-                            self._handle_oom_error()
-                            continue
-                        raise e
-
-            except Exception as e:
-                self.logger.error(f"Error in training loop: {str(e)}")
-                raise
-
-        avg_loss = total_loss / total_samples
-        return avg_loss, self._calculate_perplexity(avg_loss)
-
-    def _get_device_type(self) -> str:
-        """Determine the correct device type for autocast."""
-        if torch.cuda.is_available() and 'cuda' in str(self.config['training']['device']):
-            return 'cuda'
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            return 'mps'
-        return 'cpu'
-
     def _handle_oom_error(self):
-        """Handle out of memory errors gracefully."""
+        """
+        Handle out of memory errors by clearing cache and reducing batch size if possible.
+        """
         if hasattr(torch.cuda, 'empty_cache'):
             torch.cuda.empty_cache()
         self.logger.warning("OOM detected. Attempting to recover...")
-        
-        # Reduce batch size if possible
+
+        # Potentially reduce batch size or other strategies
         if self.config['training']['batch_size'] > 1:
             self.config['training']['batch_size'] //= 2
             self.logger.warning(f"Reduced batch size to {self.config['training']['batch_size']}")
-            
             # Recreate data loaders with new batch size
             self._setup_dataloaders()
 
-    @torch.no_grad()
-    def validate(self, epoch: int):
-        self.model.eval()
-        total_loss = 0
-        progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
+    def _setup_dataloaders(self):
+        """
+        Re-initialize dataloaders if batch size changes on OOM.
+        """
+        self.train_loader = DataLoader(
+            dataset=self.train_dataset,
+            batch_size=self.config['training']['batch_size'],
+            shuffle=True,
+            num_workers=self.config['training'].get('num_workers', 1),
+            pin_memory=self.config['training'].get('pin_memory', True),
+            collate_fn=TextDataset.collate_fn,
+            drop_last=self.config['training'].get('drop_last', False)
+        )
+        self.val_loader = DataLoader(
+            dataset=self.val_dataset,
+            batch_size=self.config['training']['batch_size'],
+            shuffle=False,
+            num_workers=self.config['training'].get('num_workers', 1),
+            pin_memory=self.config['training'].get('pin_memory', True),
+            collate_fn=TextDataset.collate_fn,
+            drop_last=self.config['training'].get('drop_last', False)
+        )
 
+    def train_one_epoch(self, epoch: int) -> Tuple[float, float]:
+        """
+        Train the model for one epoch with gradient accumulation and debugging checks.
+
+        Args: 
+            epoch (int): Current epoch number.
+        Returns:
+            Tuple[float, float]: Average training loss and perplexity for each epoch.
+        """
+        self.model.train()
+        total_loss = 0.0
+        step_in_epoch = 0
+        accumulation_counter = 0
+        accum_loss = 0.0
+
+        progress_bar = tqdm(self.train_loader, desc=f"LuminaLM Training Epoch {epoch + 1}")
+
+        for step, batch in enumerate(progress_bar):
+            try:
+                if "encoder_input_ids" in batch:
+                    encoder_input_ids = batch["encoder_input_ids"].to(self.device)
+                    encoder_attention_mask = batch["encoder_attention_mask"].to(self.device)
+                    decoder_input_ids = batch["decoder_input_ids"].to(self.device)
+                    decoder_attention_mask = batch["decoder_attention_mask"].to(self.device)
+                    labels = batch["labels"].to(self.device)
+                else:
+                    self.logger.info(f"\nStep {step} - Tensor states")
+                    debug_tensor_values(encoder_input_ids, "encoder_input_ids", self.logger)
+                    debug_tensor_values(encoder_attention_mask, "encoder_attention_mask", self.logger)
+                    debug_tensor_values(labels, "labels", self.logger)
+
+                    if decoder_input_ids is not None:
+                        outputs = self.model(
+                            input_ids=encoder_input_ids,
+                            attention_mask=encoder_attention_mask,
+                            decoder_input_ids=decoder_input_ids,
+                            decoder_attention_mask=decoder_attention_mask,
+                        )
+                    else:
+                        outputs = self.model(
+                            input_ids=encoder_input_ids,
+                            attention_mask=encoder_attention_mask,
+                        )
+                    
+                    flat_outputs, flat_labels = debug_loss_inputs(
+                        outputs,
+                        labels,
+                        self.model.config.vocab_size,
+                        self.logger
+                    )
+
+                    if flat_outputs is None or flat_labels is None:
+                        raise ValueError("IInvalid outputs/labels for loss calculation (debug checks failed).")
+                    
+                    loss = self.criterion(flat_outputs, flat_labels)
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        self.logger.error("NaN or Inf detected in loss! Skipping this step.")
+                        continue
+                    accum_loss + loss.item()
+                    loss = loss / self.gradient_accumulation_steps # Gradient accumulation
+
+                    # Mixed precision training, backpropagation, and gradient scaling
+                    self.scaler.scale(loss).backward()
+                    accumulation_counter += 1
+
+                    if accumulation_counter ==  self.gradient_accumulation_steps:
+                        #Unscale the gradients
+                        self.scaler.unscale_(self.optimizer)
+
+                        # Clip gradients for stability
+                        clip_grad_norm_(
+                            self.model.parameters(), 
+                            self.config['training'].get('max_grad_norm', 1.0)
+                            )
+                        
+                        #Optimizer step
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                        self.scheduler.step()
+
+                        # Zero gradients properly
+                        self.optimizer.zero_grad(set_to_none=True)
+                        total_loss += accum_loss
+                        step_in_epoch += 1
+
+                        # Log training metrics
+                        current_loss = accum_loss / self.gradient_accumulation_steps
+                        self._log_training_metrics(current_loss, step_in_epoch, epoch + 1)
+
+                        #Reset accumulation counter and loss
+                        accum_loss  = 0.0
+                        accumulation_counter = 0
+
+                        progress_bar.set_postfix({
+                            "loss": current_loss,
+                            "lr" : self.scheduler.get_last_lr()[0]
+                        })
+
+            except RuntimeError as re:
+                if "CUDA out of memory" in str(re):
+                    self._handle_oom_error()
+                    continue
+                else:
+                    self.logger.error(f"Runtime error in training loop: {re}")
+                    raise re
+            except Exception as e:
+                self.logger.error(f"Error in training loop: {e}")
+                raise e
+        avg_loss = total_loss / step_in_epoch if step_in_epoch > 0 else 0.0
+        return avg_loss, self._calculate_perplexity(avg_loss)
+
+    @torch.no_grad()
+    def validate(self, epoch: int) -> Tuple[float, float]:
+        """
+        Validate (evaluate) the model on the validation set.
+        """
+        self.model.eval()
+        total_loss = 0.0
+        progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
         for batch in progress_bar:
-            inputs = batch["input_ids"].to(self.config['training']['device'])
-            attention_mask = batch["attention_mask"].to(self.config['training']['device'])
-            labels = batch["labels"].to(self.config['training']['device'])
+            inputs = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            labels = batch["labels"].to(self.device)
 
             outputs = self.model(inputs, attention_mask=attention_mask)
-            loss = self.criterion(outputs.view(-1, outputs.size(-1)), labels.view(-1))
+
+            # Flatten for cross entropy
+            flat_outputs = outputs.view(-1, outputs.size(-1))
+            flat_labels = labels.view(-1)
+
+            # Loss
+            loss = self.criterion(flat_outputs, flat_labels)
             total_loss += loss.item()
 
         avg_loss = total_loss / len(self.val_loader)
         val_perplexity = self._calculate_perplexity(avg_loss)
-        self.logger.info(f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, Perplexity: {val_perplexity:.2f}")
+        self.logger.info(
+            f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, "
+            f"Perplexity: {val_perplexity:.2f}"
+        )
 
         if self.use_wandb:
             wandb.log({
@@ -448,59 +655,66 @@ class Trainer:
 
         return avg_loss, val_perplexity
 
-    def train(self):
+    def train(self) -> str:
+        """
+        Main training loop which runs across all epochs:
+          - train_one_epoch
+          - validate
+          - early stopping
+          - checkpointing
+        """
         try:
             best_val_loss = float('inf')
             best_model_path = os.path.join(
-                self.config['training']['checkpoint_dir'], 
+                self.config['training']['checkpoint_dir'],
                 'best_LuminaLM_model.pt'
             )
 
             for epoch in range(self.start_epoch, self.config['training']['epochs']):
-                try:
-                    self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
-                    train_loss, train_perplexity = self.train_one_epoch(epoch)
-                    val_loss, val_perplexity = self.validate(epoch)
+                self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
+                
+                train_loss, train_ppl = self.train_one_epoch(epoch)
+                val_loss, val_ppl = self.validate(epoch)
 
-                    # Early stopping check
-                    if self._early_stopping(val_loss):
-                        self.logger.info(f"Early stopping triggered for LuminaLM at epoch {epoch}")
-                        break
-
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
-                        torch.save({
-                            'model_name': 'LuminaLM',
-                            'epoch': epoch,
-                            'model_state_dict': self.model.state_dict(),
-                            'optimizer_state_dict': self.optimizer.state_dict(),
-                            'scheduler_state_dict': self.scheduler.state_dict(),
-                            'loss': best_val_loss
-                        }, best_model_path)
-
-                        save_checkpoint(
-                            self.config['training']['checkpoint_dir'],
-                            self.model,
-                            self.optimizer,
-                            self.scheduler,
-                            epoch,
-                            model_name='LuminaLM'
-                        )
-                        self.logger.info(f"Saved best LuminaLM model checkpoint at epoch {epoch + 1}")
-
-                    if self.use_wandb:
-                        wandb.log({
-                            "model": "LuminaLM",
-                            "epoch": epoch + 1,
-                            "train_loss": train_loss,
-                            "train_perplexity": train_perplexity,
-                            "val_loss": val_loss,
-                            "val_perplexity": val_perplexity
-                        })
-
-                except Exception as epoch_error:
-                    self.logger.error(f"Error in epoch {epoch}: {epoch_error}")
+                # Early stopping check
+                if self._early_stopping(val_loss):
+                    self.logger.info(f"Early stopping triggered for LuminaLM at epoch {epoch}")
                     break
+
+                # Save "best" checkpoint
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    torch.save({
+                        'model_name': 'LuminaLM',
+                        'epoch': epoch,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'scheduler_state_dict': self.scheduler.state_dict(),
+                        'loss': best_val_loss
+                    }, best_model_path)
+
+                    save_checkpoint(
+                        self.config['training']['checkpoint_dir'],
+                        self.model,
+                        self.optimizer,
+                        self.scheduler,
+                        epoch,
+                        model_name='LuminaLM'
+                    )
+                    self.logger.info(
+                        f"Saved best LuminaLM model checkpoint at epoch {epoch + 1}"
+                    )
+
+                # Log metrics to W&B
+                if self.use_wandb:
+                    wandb.log({
+                        "model": "LuminaLM",
+                        "epoch": epoch + 1,
+                        "train_loss": train_loss,
+                        "train_perplexity": train_ppl,
+                        "val_loss": val_loss,
+                        "val_perplexity": val_ppl
+                    })
 
             self.logger.info("LuminaLM training completed.")
             return best_model_path
@@ -508,10 +722,14 @@ class Trainer:
         except Exception as e:
             self.logger.error(f"Training failed: {e}")
             raise
-    
-    
+
+# ----------------------------------------------------------------------
+# Main function
+# ----------------------------------------------------------------------
 def main():
-    """Main function to run the training process."""
+    """
+    Main entry point for training. Loads config, sets up trainer, and starts training.
+    """
     # Paths to the configuration files
     training_config_path = 'config/training_config.yaml'
     data_config_path = 'config/training_data_config.yaml'
@@ -520,14 +738,10 @@ def main():
         # Load training config
         with open(training_config_path, 'r') as f:
             training_config = yaml.safe_load(f)
-            print(f"Loaded data_config: {data_config_path}") # for debugging
-            print(f"Learning rate: {training_config['training']['learning_rate']}, Type: {type(training_config['training']['learning_rate'])}") # for debugging
 
         # Load data config
         with open(data_config_path, 'r') as f:
             data_config = yaml.safe_load(f)
-            print(f"Loaded data_config: {data_config_path} successfully.") # for debugging
-            print(f"data_config: {data_config}, Type: {type(data_config)}")
 
         # Ensure model directory exists
         model_dir = 'model'
@@ -536,7 +750,7 @@ def main():
         # Update training configuration to set model saving directory
         training_config['training']['checkpoint_dir'] = model_dir
 
-        # Initialize trainer with the loaded configurations
+        # Initialize trainer
         trainer = Trainer(training_config=training_config, data_config=data_config)
 
         # Start training
@@ -547,6 +761,8 @@ def main():
         logging.error(f"Training failed: {e}")
         raise
 
-
+# ----------------------------------------------------------------------
+# Entry Point
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     main()

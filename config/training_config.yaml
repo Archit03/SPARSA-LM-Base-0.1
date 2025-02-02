@@ -39,10 +39,10 @@ tokenizer:
   add_special_tokens: true  # Ensure special tokens are added if missing
 
 model:
-  num_layers: 4  # Number of transformer layers
-  num_heads: 4  # Number of attention heads
-  hidden_dim: 64  # Reduced from 128
-  ff_dim: 256  # Reduced from 512
+  num_layers: 6  # Number of transformer layers
+  num_heads: 8  # Number of attention heads
+  hidden_dim: 256  # Reduced from 128
+  ff_dim: 1024  # Reduced from 512
   dropout: 0.1  # Dropout rate
   vocab_size: 6000  # Vocabulary size
   max_seq_len: 256  # Reduced from 512 to match model config
