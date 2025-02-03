@@ -80,7 +80,7 @@
     "type": "BPE",
     "dropout": null,
     "unk_token": null,
-    "continuing_subword_prefix":  "##",
+    "continuing_subword_prefix": null,
     "end_of_word_suffix": null,
     "fuse_unk": false,
     "byte_fallback": false,

@@ -178,94 +178,63 @@ class DatasetProcessor:
         """
         return TextDataset(self.val_data, tokenizer, max_length)
 
-
 class TextDataset(Dataset):
-    """
-    A PyTorch Dataset for an encoder-decoder model, forcing vocab size = 6000
-    and handling special tokens (PAD, UNK, BOS, EOS).
-    """
     def __init__(self, data: List[str], tokenizer: Any, max_length: int):
         """
+        A PyTorch Dataset for tokenized text data.
+        
         Args:
-            data (List[str]): List of raw text samples.
-            tokenizer (Any): Custom or HF tokenizer for encoding text.
-            max_length (int): Maximum sequence length for tokenization.
+            data (List[str]): List of text samples.
+            tokenizer (Any): Hugging Face or custom tokenizer.
+            max_length (int): Maximum sequence length.
         """
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-        # ** Force the vocabulary size to 6000 **
-        # This ensures labels and outputs are restricted to [0..5999].
-        self.vocab_size = 6000
-        logging.info(f"TextDataset: Forcing vocab_size = {self.vocab_size}.")
+        # Special token IDs
+        self.pad_id = tokenizer.pad_token_id
+        self.unk_id = tokenizer.unk_token_id
+        self.bos_id = tokenizer.bos_token_id
+        self.eos_id = tokenizer.eos_token_id
+        self.vocab_size = tokenizer.vocab_size  # Ensure correct vocab size
 
-        # Get special token IDs from your tokenizer config
-        # If they're missing, fallback to known IDs used in your tokenizers JSON
-        self.pad_id = getattr(self.tokenizer, "pad_token_id", 0)   # [PAD] -> ID=0
-        self.unk_id = getattr(self.tokenizer, "unk_token_id", 1)   # [UNK] -> ID=1
-        self.bos_id = getattr(self.tokenizer, "bos_token_id", 5)   # [BOS] -> ID=5
-        self.eos_id = getattr(self.tokenizer, "eos_token_id", 6)   # [EOS] -> ID=6
-
-        # If anything is None, ensure we have defaults
-        if self.pad_id is None:
-            self.pad_id = 0
-        if self.unk_id is None:
-            self.unk_id = 1
-        if self.bos_id is None:
-            self.bos_id = 5
-        if self.eos_id is None:
-            self.eos_id = 6
-
-        # Log them for clarity
-        logging.info(
-            f"PAD={self.pad_id}, UNK={self.unk_id}, BOS={self.bos_id}, EOS={self.eos_id}"
-        )
-
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.data)
-    
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
-        Tokenizes text for encoder-decoder training, preparing source and target tensors.
-    
-        Returns a dictionary with:
-            - "encoder_input_ids": Input sequence for encoder
-            - "encoder_attention_mask": Attention mask for encoder
-            - "decoder_input_ids": Input sequence for decoder (shifted target)
-            - "decoder_attention_mask": Attention mask for decoder
-            - "labels": Target sequence for loss calculation
+        Returns a dictionary with properly formatted input tensors.
         """
         text = self.data[idx]
-    
-    # Tokenize input text
+
+        # Tokenize the input text
         encoding = self.tokenizer(
             text,
             max_length=self.max_length,
             padding="max_length",
             truncation=True,
-            return_tensors="pt",
+            return_tensors="pt"
         )
 
-        input_ids = encoding["input_ids"].squeeze(0)          # [max_length]
-        attention_mask = encoding["attention_mask"].squeeze(0)  # [max_length]
+        input_ids = encoding["input_ids"].squeeze(0)
+        attention_mask = encoding["attention_mask"].squeeze(0)
 
-         # Create labels
+        # **Fix: Check if labels are within vocab range**
         labels = input_ids.clone()
-        labels[labels >= self.vocab_size] = self.unk_id  # Clamp invalid tokens to [UNK]
-        labels[labels < 0] = self.pad_id  # Prevent negative token IDs
+        if torch.any(labels < 0) or torch.any(labels >= self.vocab_size):
+            raise ValueError(f"❌ Invalid label values detected! Min: {labels.min().item()}, Max: {labels.max().item()}")
 
-    # Create decoder input IDs (shifted right)
-        decoder_input_ids = torch.full(
-            (self.max_length,), self.pad_id, dtype=torch.long
-        )
-        decoder_input_ids[0] = self.bos_id  # First token = BOS
-        decoder_input_ids[1:] = input_ids[:-1]  # Shift right
-
+        # **Fix: Shift decoder input for autoregressive tasks**
+        decoder_input_ids = torch.full((self.max_length,), self.pad_id, dtype=torch.long)
+        decoder_input_ids[0] = self.bos_id  # Start with BOS
+        decoder_input_ids[1:len(input_ids)] = input_ids[:-1]  # Shift input tokens
+        
+        # **Fix: Correct decoder attention mask**
         decoder_attention_mask = (decoder_input_ids != self.pad_id).long()
 
         return {
-            "encoder_input_ids": input_ids,          #  Fix: Change key from input_ids
+            "encoder_input_ids": input_ids,
             "encoder_attention_mask": attention_mask,
             "decoder_input_ids": decoder_input_ids,
             "decoder_attention_mask": decoder_attention_mask,
@@ -275,7 +244,7 @@ class TextDataset(Dataset):
     @staticmethod
     def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         """
-        Collate function to batch samples into a single mini-batch.
+        Custom collate function to batch tensors properly.
         """
         batch = [sample for sample in batch if sample is not None]
         if len(batch) == 0:
