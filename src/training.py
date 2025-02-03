@@ -183,9 +183,11 @@ class Trainer:
             tokenizer_path = self.config['tokenizer']['path']
             self.tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
             self.logger.info(f"Tokenizer loaded with vocab size: {self.tokenizer.vocab_size}")
-            if self.tokenizer.pad_token is None:
+            if self.tokenizer.pad_token is None or self.tokenizer.pad_token_id is None:
                 self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                 self.logger.info(f"Added `pad_token`: {self.tokenizer.pad_token}")
+            else:
+                self.logger.info(f"PAD token already exists: {self.tokenizer.pad_token} (ID: {self.tokenizer.pad_token_id})")
 
             # Load dataset configuration and initialize DatasetProcessor
             datasets = self.data_config.get('datasets', [])
@@ -572,7 +574,7 @@ class Trainer:
                     if torch.isnan(loss) or torch.isinf(loss):
                         self.logger.error("NaN or Inf detected in loss! Skipping this step.")
                         continue
-                    accum_loss + loss.item()
+                    accum_loss += loss.item()
                     loss = loss / self.gradient_accumulation_steps # Gradient accumulation
 
                     # Mixed precision training, backpropagation, and gradient scaling
@@ -624,7 +626,7 @@ class Trainer:
                 raise e
         avg_loss = total_loss / step_in_epoch if step_in_epoch > 0 else 0.0
         return avg_loss, self._calculate_perplexity(avg_loss)
-
+    
     @torch.no_grad()
     def validate(self, epoch: int) -> Tuple[float, float]:
         """
@@ -633,39 +635,54 @@ class Trainer:
         self.model.eval()
         total_loss = 0.0
         progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
+
         for batch in progress_bar:
-            inputs = batch["encoder_input_ids"].to(self.device)
-            attention_mask = batch["encoder_attention_mask"].to(self.device)
-            invalid_labels = (labels < 0) | (labels >= self.model.config.vocab_size)
-            if invalid_labels.any():
-                self.logger.error(f"Invalid label values detected! {labels[invalid_labels].tolist()}")
-                raise ValueError("Invalid labels found in validation step!")
-            labels = batch["labels"].to(self.device)
+            try:
+                inputs = batch.get("encoder_input_ids", None)
+                attention_mask = batch.get("encoder_attention_mask", None)
+                labels = batch.get("labels", None)  # FIX: Assign labels BEFORE checking invalid values
 
-            outputs = self.model(inputs, attention_mask=attention_mask)
+                if inputs is None or attention_mask is None or labels is None:
+                    self.logger.error("Missing keys in batch. Skipping this batch...")
+                    continue
 
-            # Flatten for cross entropy
-            flat_outputs = outputs.view(-1, outputs.size(-1))
-            flat_labels = labels.view(-1)
+                inputs = inputs.to(self.device)
+                attention_mask = attention_mask.to(self.device)
+                labels = labels.to(self.device)
 
-            # Loss
-            loss = self.criterion(flat_outputs, flat_labels)
-            total_loss += loss.item()
+                #FIX: Assign `labels` before using in `invalid_labels`
+                invalid_labels = (labels < 0) | (labels >= self.model.config.vocab_size)
+                if invalid_labels.any():
+                    self.logger.error(f"Invalid label values detected! {labels[invalid_labels].tolist()}")
+                    raise ValueError("Invalid labels found in validation step!")
+                
+                # Forward pass
+                outputs = self.model(inputs, attention_mask=attention_mask)
+                 
+                # Flatten for cross-entropy loss
+                flat_outputs = outputs.view(-1, outputs.size(-1))
+                flat_labels = labels.view(-1)
 
-        avg_loss = total_loss / len(self.val_loader)
+                # Compute loss
+                loss = self.criterion(flat_outputs, flat_labels)
+                total_loss += loss.item()
+            except Exception as e:
+                self.logger.error(f"Validation: {e}")
+        
+        avg_loss = total_loss / len(self.val_loader) if len(self.val_loader) > 0 else float('inf')
         val_perplexity = self._calculate_perplexity(avg_loss)
+
         self.logger.info(
             f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, "
             f"Perplexity: {val_perplexity:.2f}"
-        )
-
+            )
         if self.use_wandb:
             wandb.log({
                 "model": "LuminaLM",
                 "val_loss": avg_loss,
                 "val_perplexity": val_perplexity
             })
-
+        
         return avg_loss, val_perplexity
 
     def train(self) -> str:

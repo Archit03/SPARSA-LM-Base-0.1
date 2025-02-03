@@ -192,13 +192,21 @@ class TextDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-        # Special token IDs
-        self.pad_id = tokenizer.pad_token_id
-        self.unk_id = tokenizer.unk_token_id
-        self.bos_id = tokenizer.bos_token_id
-        self.eos_id = tokenizer.eos_token_id
-        self.vocab_size = tokenizer.vocab_size  # Ensure correct vocab size
+        self.vocab_size = tokenizer.vocab_size
 
+        self.pad_id = tokenizer.convert_tokens_to_ids("[PAD]")
+        self.unk_id = tokenizer.convert_tokens_to_ids("[UNK]")
+        self.bos_id = tokenizer.convert_tokens_to_ids("[BOS]")
+        self.eos_id = tokenizer.convert_tokens_to_ids("[EOS]")
+
+        print(f"🔹 Special Tokens: PAD={self.pad_id}, UNK={self.unk_id}, BOS={self.bos_id}, EOS={self.eos_id}")
+
+        # **Fix: Ensure we have correct token IDs**
+        if None in {self.pad_id, self.unk_id, self.bos_id, self.eos_id}:
+            raise ValueError(
+                f" Missing special tokens! PAD={self.pad_id}, UNK={self.unk_id}, BOS={self.bos_id}, EOS={self.eos_id}"
+            )
+        
     def __len__(self):
         return len(self.data)
 
