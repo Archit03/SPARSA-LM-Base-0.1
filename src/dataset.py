@@ -223,7 +223,7 @@ class TextDataset(Dataset):
         # **Fix: Check if labels are within vocab range**
         labels = input_ids.clone()
         if torch.any(labels < 0) or torch.any(labels >= self.vocab_size):
-            raise ValueError(f"❌ Invalid label values detected! Min: {labels.min().item()}, Max: {labels.max().item()}")
+            raise ValueError(f"Invalid label values detected! Min: {labels.min().item()}, Max: {labels.max().item()}")
 
         # **Fix: Shift decoder input for autoregressive tasks**
         decoder_input_ids = torch.full((self.max_length,), self.pad_id, dtype=torch.long)

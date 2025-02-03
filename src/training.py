@@ -182,7 +182,7 @@ class Trainer:
             # Load tokenizer
             tokenizer_path = self.config['tokenizer']['path']
             self.tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
-            self.logger.info(f"✅ Tokenizer loaded with vocab size: {self.tokenizer.vocab_size}")
+            self.logger.info(f"Tokenizer loaded with vocab size: {self.tokenizer.vocab_size}")
             if self.tokenizer.pad_token is None:
                 self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                 self.logger.info(f"Added `pad_token`: {self.tokenizer.pad_token}")
@@ -565,7 +565,7 @@ class Trainer:
  
                     # Ensure labels are within the correct range
                     if torch.any(flat_labels < -100) or torch.any(flat_labels >= self.model.config.vocab_size):
-                        self.logger.error(f"❌ Labels out of bounds! Min: {flat_labels.min().item()}, Max: {flat_labels.max().item()}")
+                        self.logger.error(f"Labels out of bounds! Min: {flat_labels.min().item()}, Max: {flat_labels.max().item()}")
                         raise ValueError("Detected invalid label values before loss calculation.")
                    
                     loss = self.criterion(flat_outputs, flat_labels)
@@ -638,7 +638,7 @@ class Trainer:
             attention_mask = batch["encoder_attention_mask"].to(self.device)
             invalid_labels = (labels < 0) | (labels >= self.model.config.vocab_size)
             if invalid_labels.any():
-                self.logger.error(f"❌ Invalid label values detected! {labels[invalid_labels].tolist()}")
+                self.logger.error(f"Invalid label values detected! {labels[invalid_labels].tolist()}")
                 raise ValueError("Invalid labels found in validation step!")
             labels = batch["labels"].to(self.device)
 
