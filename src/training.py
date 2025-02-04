@@ -185,7 +185,6 @@ class Trainer:
             self.logger.info(f"Tokenizer loaded with vocab size: {self.tokenizer.vocab_size}")
             if self.tokenizer.pad_token is None or self.tokenizer.pad_token_id is None:
                 self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-                self.logger.info(f"Added `pad_token`: {self.tokenizer.pad_token}")
             else:
                 self.logger.info(f"PAD token already exists: {self.tokenizer.pad_token} (ID: {self.tokenizer.pad_token_id})")
 

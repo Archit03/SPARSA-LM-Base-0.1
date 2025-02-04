@@ -853,9 +853,9 @@ class Transformer(nn.Module):
         # Backward pass with gradient scaling
         self.scaler.scale(loss).backward()
         
+        self.scaler.unscale_(optimizer) #Unscale gradients before clipping.
         # Gradient clipping
         if self.config.max_grad_norm > 0:
-            self.scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(self.parameters(), self.config.max_grad_norm)
         
         self.scaler.step(optimizer)
@@ -901,7 +901,9 @@ class Transformer(nn.Module):
         # Accuracy
         mask = labels != self.config.pad_token_id
         correct = (predictions == labels) & mask
-        metrics['accuracy'] = correct.sum().float() / mask.sum()
+        
+        denominator = mask.sum().float().clamp(min=1)  # Prevent divide-by-zero
+        metrics['accuracy'] = correct.sum().float() / denominator
         
         # Perplexity
         metrics['perplexity'] = torch.exp(self.compute_loss(outputs, labels))
@@ -911,29 +913,36 @@ class Transformer(nn.Module):
     def compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Compute cross entropy loss with input validation."""
         # Validate shapes and values
-        if outputs.dim() != 3:
-            raise ValueError(f"Expected 3D tensor for outputs, got shape {outputs.shape}")
+        if outputs.dim != 3:
+            raise ValueError(f"ERROR: Expected outputs shape (batch_size, seq_len, vocab_size), but got {outputs.shape}")  
         if labels.dim() != 2:
-            raise ValueError(f"Expected 2D tensor for labels, got shape {labels.shape}")
-            
+            raise ValueError(f"ERROR: Expected labels shape (batch_size, seq_len), but got {labels.shape}")
+        
         # Ensure labels are within valid range
         if torch.any(labels >= self.config.vocab_size):
-            labels = torch.clamp(labels, 0, self.config.vocab_size - 1)
-            
-        if self.config.label_smoothing > 0:
-            return F.cross_entropy(
-                outputs.view(-1, outputs.size(-1)),
-                labels.view(-1),
-                ignore_index=self.config.pad_token_id,
-                label_smoothing=self.config.label_smoothing
-            )
-        else:
-            return F.cross_entropy(
-                outputs.view(-1, outputs.size(-1)),
-                labels.view(-1),
-                ignore_index=self.config.pad_token_id
-            )
+            self.logger.warning(f"Labels Exceeded vocab size! Claming values")
+            labels = torch.clamp(labels, 0, self.config.vocab_size -1)
+       
+        # Ensure labels do not contain negative values (except -100 for ignore_index)
+        if torch.any((labels < 0) & (labels != -100)):
+            raise ValueError(f" ERROR: Found invalid negative label values! Min label: {labels.min().item()}")
+        
+        # Flatten tensors for loss calculation
+        flatten_outputs = outputs.view(-1, outputs.size(-1))
+        flat_labels = labels.view(-1)
 
+        # Retrieve label smoothing parameter (default to 0 if missing)
+        label_smoothing = getattr(self.config, "label_smoothing", 0.0)
+
+        #Compute Loss with optional label smoothing
+        loss = F.cross_entropy(
+            flatten_outputs,
+            flat_labels,
+            ignore_index=self.config.pad_token_id,
+            label_smoothing=label_smoothing
+        )
+        return loss
+        
     @staticmethod
     def get_scheduler(optimizer, config: TransformerConfig, num_training_steps: int):
         """Enhanced learning rate scheduler with warmup"""
