@@ -14,4 +14,5 @@ datasets:
   config:
     dataset_name: "hari560/medical-data"
     cache_dir: "cache/hari560" 
+    keep_in_memory: false
 

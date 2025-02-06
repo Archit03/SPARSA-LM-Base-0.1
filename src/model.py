@@ -80,7 +80,7 @@ class TransformerConfig:
         
         # Architecture Options
         self.prenorm = prenorm
-        self.tie_embeddings = tie_embeddings,
+        self.tie_embeddings = tie_embeddings
         
         # Training Features
         self.use_checkpointing = use_checkpointing
@@ -113,48 +113,6 @@ class TransformerConfig:
 
         # Added this line
         self.use_reentrant = use_reentrant
-
-    @staticmethod
-    def get_2M_config():
-        """Returns config for exactly ~2M parameter model with 6k vocab size"""
-        return TransformerConfig(
-            # Model Architecture
-            vocab_size=6000,
-            d_model=128,      # Reduced size
-            num_layers=3,     # Reduced layers
-            num_heads=4,
-            d_ff=512,        # 4x d_model
-            max_seq_len=2048,
-            dropout=0.1,
-            
-            # Attention Mechanisms
-            use_rope=True,
-            window_size=256,
-            global_tokens=8,
-            
-            # Architecture Options
-            prenorm=True,
-            tie_embeddings=True,  # Important for parameter sharing
-            
-            # Training Features
-            use_checkpointing=False,
-            use_mixed_precision=True,
-            use_regularization=False,
-            label_smoothing=0.0,
-            l2_reg=0.0,
-            max_grad_norm=1.0,
-            
-            # Optimization
-            learning_rate=3e-4,
-            weight_decay=0.01,
-            warmup_ratio=0.1,
-            scheduler_type="linear_warmup",
-            
-            # Special Tokens
-            pad_token_id=0,
-            
-            activation="gelu"
-        )
 
 ###############################################################################
 # Core Components - Positional Encodings
@@ -717,6 +675,7 @@ class Transformer(nn.Module):
         
         # Create encoder
         self.encoder = Encoder(config)
+        self.decoder = Decoder(config)
         
         # Output projection
         self.generator = nn.Linear(config.d_model, config.vocab_size)
@@ -790,6 +749,13 @@ class Transformer(nn.Module):
             )
 
             logits = self.generator(decoder_outputs)
+            if logits.size(-1) != self.config.vocab_size:
+                self.logger.warning(
+                    f"Logits last dimension {logits.size(-1)} does not match config.vocab_size {self.config.vocab_size}. Slicing logits."
+                )
+                logits = logits[..., :self.config.vocab_size]
+            logits = torch.clamp(logits, min=-1e9, max=1e9)
+
 
             #If using cache, return both the logits and the new cache
             if use_cache:
@@ -913,14 +879,14 @@ class Transformer(nn.Module):
     def compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Compute cross entropy loss with input validation."""
         # Validate shapes and values
-        if outputs.dim != 3:
+        if outputs.dim() != 3:
             raise ValueError(f"ERROR: Expected outputs shape (batch_size, seq_len, vocab_size), but got {outputs.shape}")  
         if labels.dim() != 2:
             raise ValueError(f"ERROR: Expected labels shape (batch_size, seq_len), but got {labels.shape}")
         
         # Ensure labels are within valid range
         if torch.any(labels >= self.config.vocab_size):
-            self.logger.warning(f"Labels Exceeded vocab size! Claming values")
+            self.logger.warning(f"Labels Exceeded vocab size! Clamping values")
             labels = torch.clamp(labels, 0, self.config.vocab_size -1)
        
         # Ensure labels do not contain negative values (except -100 for ignore_index)

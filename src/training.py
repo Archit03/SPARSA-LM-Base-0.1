@@ -539,6 +539,7 @@ class Trainer:
                     debug_tensor_values(labels, "labels", self.logger)
 
                     if decoder_input_ids is not None:
+                        decoder_attention_mask = Transformer._generate_square_subsequent_mask(decoder_input_ids.size(1)).to(self.device)
                         outputs = self.model(
                             input_ids=encoder_input_ids,
                             attention_mask=encoder_attention_mask,
@@ -551,6 +552,16 @@ class Trainer:
                             attention_mask=encoder_attention_mask,
                         )
                     
+                    if outputs.size(-1) != self.model.config.vocab_size:
+                        self.logger.warning(
+                            f"Outputs last dimension {outputs.size(-1)} does not match vocab_size {self.model.config.vocab_size}. Slicing outputs."
+                        )
+                        outputs = outputs[..., :self.model.config.vocab_size]   
+                    
+                    outputs = torch.clamp(outputs, min=-1e9, max=1e9) 
+
+                    labels = torch.where(labels != -100, torch.clamp(labels, 0, self.model.config.vocab_size - 1), labels) #Clamp labels, so the training is more stable. 
+
                     flat_outputs, flat_labels = debug_loss_inputs(
                         outputs,
                         labels,
@@ -568,10 +579,12 @@ class Trainer:
                     if torch.any(flat_labels < -100) or torch.any(flat_labels >= self.model.config.vocab_size):
                         self.logger.error(f"Labels out of bounds! Min: {flat_labels.min().item()}, Max: {flat_labels.max().item()}")
                         raise ValueError("Detected invalid label values before loss calculation.")
+                    
+                    outputs = torch.clamp(outputs, min=-1e9, max=1e9)
                    
                     loss = self.criterion(flat_outputs, flat_labels)
                     if torch.isnan(loss) or torch.isinf(loss):
-                        self.logger.error("NaN or Inf detected in loss! Skipping this step.")
+                        self.logger.error("NaN or Inf detected in loss! Skipping this step....")
                         continue
                     accum_loss += loss.item()
                     loss = loss / self.gradient_accumulation_steps # Gradient accumulation
@@ -649,6 +662,8 @@ class Trainer:
                 attention_mask = attention_mask.to(self.device)
                 labels = labels.to(self.device)
 
+                labels = torch.where(labels != -100, torch.clamp(labels, 0, self.model.config.vocab_size - 1), labels)
+
                 #FIX: Assign `labels` before using in `invalid_labels`
                 invalid_labels = (labels < 0) | (labels >= self.model.config.vocab_size)
                 if invalid_labels.any():
@@ -661,6 +676,8 @@ class Trainer:
                 # Flatten for cross-entropy loss
                 flat_outputs = outputs.view(-1, outputs.size(-1))
                 flat_labels = labels.view(-1)
+
+                flat_outputs = torch.clamp(flat_outputs, min=-1e9, max=1e9)
 
                 # Compute loss
                 loss = self.criterion(flat_outputs, flat_labels)

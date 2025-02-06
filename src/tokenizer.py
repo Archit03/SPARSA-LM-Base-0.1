@@ -457,59 +457,52 @@ class HybridTokenizationStrategy:
             logging.error(f"Bidirectional encoding failed: {str(e)}")
             raise
 
-    def _combine_encoded_chunks(
-        self,
-        chunks: List[Dict[str, Tensor]]
+    def _combined_encoded_chunks(
+            self,
+            chunks: List[Dict[str, Tensor]]
     ) -> Dict[str, Tensor]:
         """
         Combine encoded chunks with enhanced validation and memory efficiency.
+        Ensures all tensors have the same sequence length before concatenation.
         """
         if not chunks:
-            raise ValueError("No chunks to combine")
-            
+            raise ValueError("No chunks to combine.")
         try:
-            # Validate chunk compatibility before combining
-            reference_shapes = {key: chunks[0][key].shape[1:] for key in chunks[0].keys()}
-            for i, chunk in enumerate(chunks):
-                if set(chunk.keys()) != set(reference_shapes.keys()):
-                    raise ValueError(f"Mismatched keys in chunk {i}")
-                for key, shape in reference_shapes.items():
-                    if chunk[key].shape[1:] != shape:
-                        raise ValueError(
-                            f"Mismatched shapes for key '{key}' in chunk {i}: "
-                            f"expected {shape}, got {chunk[key].shape[1:]}"
-                        )
+            #Get the max sequence Length in all chunks
+            max_seq_len = max(chunk["input_ids"].shape[1] for chunk in chunks)
 
-            # Combine chunks with memory monitoring
-            combined = {}
-            for key in chunks[0].keys():
-                tensors = [chunk[key] for chunk in chunks]
-                
-                # Calculate total memory requirement
-                total_elements = sum(t.numel() for t in tensors)
-                element_size = tensors[0].element_size()
-                required_memory = total_elements * element_size * 2  # Factor of 2 for safety
-                
-                # Check available memory
-                if torch.cuda.is_available():
-                    available_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-                    if required_memory > available_memory * 0.9:  # 90% threshold
-                        # Fall back to CPU concatenation
-                        tensors = [t.cpu() for t in tensors]
-                        combined[key] = torch.cat(tensors, dim=0).to(chunks[0][key].device)
-                    else:
-                        combined[key] = torch.cat(tensors, dim=0)
-                else:
-                    combined[key] = torch.cat(tensors, dim=0)
-                
-                # Clear intermediate tensors
-                del tensors
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
-                
-            return combined
+            #Helper function for padding sequences
+            def pad_sequence(tensor, target_length, pad_value=0):
+                """Pads sequence tensor to the target length along dim=1."""
+                if tensor.dim() == 1:
+                    tensor = tensor.unsqueeze(0)
+                current_length = tensor.shape[1]
+                if current_length < target_length:
+                    pad_size = target_length - current_length
+                    padding = (0, pad_size)
+                    tensor = torch.nn.functional.pad(tensor, padding, value=pad_value)
+                return tensor
             
+            padded_chunks = []
+            for chunk in chunks:
+                padded_chunk = {
+                    key:pad_sequence(chunk[key], max_seq_len, pad_value=0) if key in ["input_ids", "decoder_input_ids"]
+                    else chunk[key]
+                    for key in chunk.keys()
+                }
+                padded_chunks.append(padded_chunk)
+
+            if not padded_chunks:
+                raise ValueError("No valid padded chunks to combine.")
+            
+            #Combine chunks
+            combined = {
+                key: torch.cat([chunk[key] for chunk in padded_chunks], dim=0)
+                for key in padded_chunks[0].keys()
+            }
+            return combined
         except Exception as e:
-            logging.error(f"Failed to combine encoded chunks: {str(e)}")
+            logging.error(f"Error in _combined_encoded_chunks: {str(e)}")
             raise
 
     def _get_optimal_chunk_size(self) -> int:
