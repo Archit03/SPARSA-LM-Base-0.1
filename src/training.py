@@ -263,7 +263,6 @@ class Trainer:
                 vocab_size=self.config['model']['vocab_size'],
                 tie_embeddings=self.config['model'].get('tie_embeddings', False),
                 scheduler_type=scheduler_type,  
-                lr_scheduler_kwargs=lr_scheduler_kwargs,
                 learning_rate=self.config['training']['learning_rate'],
                 weight_decay=self.config['training']['weight_decay'],
                 warmup_ratio=self.config['training'].get('warmup_ratio', 0.1),
@@ -285,9 +284,7 @@ class Trainer:
                 name=scheduler_type,
                 optimizer=self.optimizer,
                 num_warmup_steps=int(num_training_steps * self.config['training'].get('warmup_ratio')),
-                num_training_steps=num_training_steps,
-                **lr_scheduler_kwargs,
-                **min_lr
+                num_training_steps=num_training_steps
             )
             self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
 

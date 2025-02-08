@@ -1,7 +1,7 @@
 training:
   device: "cuda"
   epochs: 5              
-  batch_size: 4         
+  batch_size: 4        
   learning_rate: 0.0002  
   weight_decay: 0.01     
   max_grad_norm: 1.0     
@@ -10,7 +10,7 @@ training:
   resume_from_checkpoint: null
   checkpoint_dir: "checkpoints"
   checkpoint_save_frequency: 1
-  scheduler_type: "cosine_with_min_lr"
+  scheduler_type: "cosine"
   lr_scheduler_kwargs:
     min_lr: 1e-6 
   warmup_ratio: 0.1               
