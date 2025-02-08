@@ -34,18 +34,21 @@ class TransformerConfig:
         tie_embeddings: bool = False,
         
         # Training Features
-        use_checkpointing: bool = False,
-        use_regularization: bool = False,
+        use_checkpointing: bool = True,
+        use_regularization: bool = True,
         use_mixed_precision: bool = True,
-        label_smoothing: float = 0.0,
-        l2_reg: float = 0.0,
+        label_smoothing: float = 0.1,
+        l2_reg: float = 0.01,
         max_grad_norm: float = 1.0,
         
         # Optimization
-        learning_rate: float = 3e-4,
-        weight_decay: float = 0.01,
+        learning_rate: float = 1e-4,
+        weight_decay: float = 0.1,
         warmup_ratio: float = 0.1,
-        scheduler_type: str = "linear",
+        scheduler_type: str = "cosine_warmup",
+
+        init_scale: float = 0.02,
+        layer_norm_eps: float = 1e-5,
         
         # Special Tokens
         pad_token_id: int = 0,
@@ -57,7 +60,7 @@ class TransformerConfig:
         device: Optional[torch.device] = None,
         
         # Added this parameter
-        use_reentrant: bool = False
+        use_reentrant: bool = True
     ):
         """Initialize transformer configuration with validation."""
         # Validate core architecture parameters
@@ -72,6 +75,8 @@ class TransformerConfig:
         self.d_ff = d_ff  # This is ff_dim from config
         self.max_seq_len = max_seq_len
         self.dropout = dropout
+        self.init_scale = init_scale
+        self.layer_norm_eps = layer_norm_eps
         
         # Attention Mechanisms
         self.use_rope = use_rope
@@ -184,187 +189,106 @@ class PositionalEncoding(nn.Module):
 # Sparse Multi-Head Attention with Optional KV Caching
 ###############################################################################
 class SparseMultiHeadAttention(nn.Module):
-    """
-    Multi-Head Attention using a local-window sparse mechanism.
-    Optionally supports caching for incremental decoding.
-    """
-    def __init__(
-        self, 
-        config: TransformerConfig,
-        is_causal: bool = False
-    ):
+    def __init__(self, config: TransformerConfig, is_causal: bool = False):
         super().__init__()
         self.config = config
         self.is_causal = is_causal
         
+        # Ensure dimensions are properly aligned
+        assert config.d_model % config.num_heads == 0, "d_model must be divisible by num_heads"
         self.d_k = config.d_model // config.num_heads
+        self.num_heads = config.num_heads
+        
+        # Linear projections with correct output dimensions
         self.w_q = nn.Linear(config.d_model, config.d_model)
         self.w_k = nn.Linear(config.d_model, config.d_model)
         self.w_v = nn.Linear(config.d_model, config.d_model)
         self.out_proj = nn.Linear(config.d_model, config.d_model)
         
-        if config.use_rope:
-            self.rope = RotaryPositionalEmbedding(self.d_k, config.max_seq_len)
-        
         self.dropout = nn.Dropout(config.dropout)
+        
+        # Debug flag
+        self.debug = True
 
-    def _apply_rope(self, x, seq_len):
-        # x: (batch, heads, seq_len, head_dim)
-        if not self.config.use_rope:
-            return x
-            
-        cos, sin = self.rope(x, seq_len)
-        # Apply RoPE rotation
-        x_rope = torch.cat([-x[..., 1::2], x[..., ::2]], dim=-1)
-        return x * cos + x_rope * sin
+    def _debug_shapes(self, tensor, name):
+        if self.debug:
+            print(f"Shape of {name}: {tensor.shape}")
 
-    def attn_function(self, Q, K, V, local_mask, attn_mask):
-        """
-        Perform scaled dot-product attention with improved numerical stability.
-        """
-        batch_size, num_heads, seq_len, _ = Q.size()
-        
-        # Add small epsilon to prevent division by zero
-        eps = 1e-8
-        
-        # Check and fix any NaN/Inf in input tensors
-        for tensor, name in [(Q, 'Q'), (K, 'K'), (V, 'V')]:
-            if torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)):
-                print(f"Warning: Found NaN/Inf in {name} tensor!")
-                tensor = torch.nan_to_num(tensor, nan=0.0, posinf=1e4, neginf=-1e4)
-        
-        # Ensure local_mask is on correct device
-        local_mask = local_mask.to(Q.device)
-        local_mask = local_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, num_heads, seq_len, seq_len)
+    def forward(self, q, k, v, attn_mask=None, past_key_value=None, use_cache=False):
+        batch_size = q.size(0)
+        seq_len_q = q.size(1)
+        seq_len_k = k.size(1)
+        seq_len_v = v.size(1)
 
-        # Calculate attention scores with improved numerical stability
-        scale_factor = math.sqrt(self.d_k)
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / (scale_factor + eps)
-        
-        # Clamp scores to prevent extreme values
-        scores = torch.clamp(scores, min=-1e4, max=1e4)
+        # Debug input shapes
+        self._debug_shapes(q, "query input")
+        self._debug_shapes(k, "key input")
+        self._debug_shapes(v, "value input")
 
-        # Handle attention mask
-        if attn_mask is not None:
-            attn_mask = attn_mask.to(Q.device)
-            if attn_mask.dim() == 2:
-                attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
-            elif attn_mask.dim() == 3:
-                attn_mask = attn_mask.unsqueeze(1)
-            attn_mask = attn_mask.expand(batch_size, num_heads, seq_len, seq_len)
-            scores = scores.masked_fill(~attn_mask.bool(), float('-inf'))
+        # Project and reshape
+        # (batch_size, seq_len, d_model) -> (batch_size, seq_len, num_heads, d_k)
+        q = self.w_q(q).view(batch_size, seq_len_q, self.num_heads, self.d_k)
+        k = self.w_k(k).view(batch_size, seq_len_k, self.num_heads, self.d_k)
+        v = self.w_v(v).view(batch_size, seq_len_v, self.num_heads, self.d_k)
 
-        # Apply local window mask
-        scores = scores + local_mask
-        
-        # Apply softmax with improved numerical stability
-        scores = F.softmax(scores, dim=-1, dtype=torch.float32)  # Force float32 for better stability
-        
-        # Check for NaN/Inf in attention weights
-        if torch.any(torch.isnan(scores)) or torch.any(torch.isinf(scores)):
-            print("Warning: NaN/Inf in attention weights!")
-            scores = torch.nan_to_num(scores, nan=0.0, posinf=1.0, neginf=0.0)
-            # Renormalize if necessary
-            scores = scores / (scores.sum(dim=-1, keepdim=True) + eps)
-        
-        # Compute output with dropout
-        output = torch.matmul(scores, V)
-        
-        # Final output check
-        if torch.any(torch.isnan(output)) or torch.any(torch.isinf(output)):
-            print("Warning: NaN/Inf in attention output!")
-            output = torch.nan_to_num(output, nan=0.0, posinf=1e4, neginf=-1e4)
-        
-        return output, scores
+        # Debug projected shapes
+        self._debug_shapes(q, "query projected")
+        self._debug_shapes(k, "key projected")
+        self._debug_shapes(v, "value projected")
 
-    def forward(
-        self, 
-        q, 
-        k, 
-        v, 
-        attn_mask=None, 
-        past_key_value=None, 
-        use_cache=False
-    ):
-        """
-        q, k, v: (batch_size, seq_len, d_model)
-        attn_mask: e.g. (batch_size, 1, seq_len, seq_len), or broadcastable
-        past_key_value: (past_k, past_v) each with shape:
-                        (batch_size, num_heads, past_seq_len, d_k)
-        use_cache: If True, will store/return new (k, v).
-        """
-        # Validate input shapes
-        batch_size, seq_len, d_model = q.size()
-        assert d_model == self.config.d_model, f"Input dimension {d_model} doesn't match config dimension {self.config.d_model}"
-        assert k.size(0) == batch_size and v.size(0) == batch_size, "Batch sizes must match"
-        assert k.size(-1) == d_model and v.size(-1) == d_model, "Hidden dimension must match"
-        
-        # 1) Project Q, K, V
-        Q = self.w_q(q)
-        K_ = self.w_k(k)
-        V_ = self.w_v(v)
+        # Transpose for attention computation
+        # (batch_size, seq_len, num_heads, d_k) -> (batch_size, num_heads, seq_len, d_k)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
 
-        # 2) Reshape
-        Q = Q.view(batch_size, seq_len, self.config.num_heads, self.d_k).transpose(1, 2)
-        K_ = K_.view(batch_size, seq_len, self.config.num_heads, self.d_k).transpose(1, 2)
-        V_ = V_.view(batch_size, seq_len, self.config.num_heads, self.d_k).transpose(1, 2)
-
-        # Apply RoPE if configured
-        if self.config.use_rope:
-            Q = self._apply_rope(Q, seq_len)
-            K_ = self._apply_rope(K_, K_.size(2))
-
-        # 3) Handle caching with validation
+        # Handle cached KV states
         if past_key_value is not None:
             past_k, past_v = past_key_value
-            # Only try to use cache if both past_k and past_v are not None
             if past_k is not None and past_v is not None:
-                try:
-                    # Validate cache shapes
-                    assert past_k.size(0) == batch_size, "Cache batch size must match"
-                    assert past_k.size(1) == self.config.num_heads, "Cache heads must match"
-                    assert past_k.size(-1) == self.d_k, "Cache dimension must match"
-                    assert past_k.size() == past_v.size(), "Cache K,V shapes must match"
-                    
-                    K_ = torch.cat([past_k, K_], dim=2)  # seq_len dimension
-                    V_ = torch.cat([past_v, V_], dim=2)
-                except Exception as e:
-                    # Log the error but continue without using cache
-                    print(f"Warning: Could not use cache due to: {str(e)}")
-                    # Don't raise the exception - continue without cache
+                k = torch.cat([past_k, k], dim=2)
+                v = torch.cat([past_v, v], dim=2)
+
+        # Compute attention scores
+        scaling = float(self.d_k) ** -0.5
+        scores = torch.matmul(q, k.transpose(-2, -1)) * scaling
+
+        self._debug_shapes(scores, "attention scores")
+
+        # Apply masks if provided
+        if attn_mask is not None:
+            # Expand mask for multiple heads
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)  # Add head and batch dimensions
+            scores = scores.masked_fill(~attn_mask.bool(), float('-inf'))
+
+        # Apply causal mask if needed
+        if self.is_causal:
+            causal_mask = torch.triu(torch.ones(seq_len_q, seq_len_k, device=q.device), diagonal=1).bool()
+            scores = scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+
+        # Apply softmax and dropout
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # Compute output
+        output = torch.matmul(attn_weights, v)
+
+        # Transpose and reshape back
+        # (batch_size, num_heads, seq_len, d_k) -> (batch_size, seq_len, num_heads, d_k)
+        output = output.transpose(1, 2).contiguous()
         
-        next_key_value = None
-        if use_cache:
-            next_key_value = (K_, V_)
+        # (batch_size, seq_len, num_heads, d_k) -> (batch_size, seq_len, d_model)
+        output = output.view(batch_size, -1, self.config.d_model)
 
-        # 4) Build or reuse local window mask
-        full_seq_len = K_.size(2)
-        local_mask = build_local_window_mask(full_seq_len, self.config.window_size, self.config.global_tokens, self.is_causal, self.config.device)
-
-        # 5) Compute attention with proper error handling
-        def fn_attention(Q_, K__, V__):
-            try:
-                output, _ = self.attn_function(Q_, K__, V__, local_mask, attn_mask)
-                return output
-            except RuntimeError as e:
-                if "out of memory" in str(e):
-                    torch.cuda.empty_cache()
-                    raise RuntimeError("GPU out of memory. Try reducing batch size or sequence length.")
-                raise e
-        
-        if self.config.use_checkpointing and Q.requires_grad:
-            output = checkpoint(fn_attention, Q, K_, V_)
-        else:
-            output = fn_attention(Q, K_, V_)
-
-        # 6) Reshape back
-        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_model)
-
-        # 7) Final linear projection
+        # Final projection
         output = self.out_proj(output)
 
-        return output, next_key_value
+        # Prepare cache if needed
+        next_key_value = (k, v) if use_cache else None
 
+        return output, next_key_value
+    
 ###############################################################################
 # Local Window Mask with Optional Global Tokens
 ###############################################################################
@@ -399,9 +323,9 @@ class ResidualConnection(nn.Module):
     y = x + dropout(sublayer(LN(x)))
     If gradient checkpointing is enabled, wraps the sublayer call in checkpoint().
     """
-    def __init__(self, d_model, dropout=0.1, use_checkpointing=False, use_reentrant=False):
+    def __init__(self, d_model, dropout=0.1, use_checkpointing=False, use_reentrant=False, layer_norm_eps=1e-5):
         super().__init__()
-        self.norm = nn.LayerNorm(d_model)
+        self.norm = nn.LayerNorm(d_model, eps=layer_norm_eps)
         self.dropout = nn.Dropout(dropout)
         self.use_checkpointing = use_checkpointing
         self.use_reentrant = use_reentrant
@@ -413,16 +337,34 @@ class ResidualConnection(nn.Module):
         def forward_sublayer(normed_x):
             return sublayer(normed_x)
         
+        # Add value check
+        if not x.isfinite().all():
+            print("Warning: Non-finite values in residual input")
+            x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
+        
         normed = self.norm(x)
-
+        
         if self.use_checkpointing and normed.requires_grad:
-            out = x + self.dropout(checkpoint(
+            sublayer_output = checkpoint(
                 forward_sublayer, 
                 normed,
                 use_reentrant=self.use_reentrant
-            ))
+            )
         else:
-            out = x + self.dropout(sublayer(normed))
+            sublayer_output = sublayer(normed)
+        
+        # Add stability check for sublayer output
+        if not sublayer_output.isfinite().all():
+            print("Warning: Non-finite values in sublayer output")
+            sublayer_output = torch.nan_to_num(sublayer_output, nan=0.0, posinf=1e4, neginf=-1e4)
+        
+        out = x + self.dropout(sublayer_output)
+        
+        # Final stability check
+        if not out.isfinite().all():
+            print("Warning: Non-finite values in residual output")
+            out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
+        
         return out
 
 ###############################################################################
@@ -455,50 +397,64 @@ class FeedForward(nn.Module):
 class EncoderBlock(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
+        self.config = config
+        
+        # Create attention and feedforward layers
+        self.self_attn = SparseMultiHeadAttention(config)
+        self.feed_forward = FeedForward(config)
+        
+        # Create residual connections with proper dimensions
         self.self_attn_res = ResidualConnection(
-            config.d_model, 
-            config.dropout, 
+            config.d_model,
+            config.dropout,
             config.use_checkpointing,
             config.use_reentrant
         )
         self.ff_res = ResidualConnection(
-            config.d_model, 
-            config.dropout, 
+            config.d_model,
+            config.dropout,
             config.use_checkpointing,
             config.use_reentrant
         )
 
-        self.self_attn = SparseMultiHeadAttention(config)
-        self.feed_forward = FeedForward(config)
-
     def forward(self, x, src_mask=None, past_key_value=None, use_cache=False):
         """
-        x: (batch_size, seq_len, d_model)
-        src_mask: optional attention mask
-        past_key_value: optional caching
-        use_cache: bool
+        Forward pass with dimension checks
         """
-        # Self-attention
-        next_kv = None
+        batch_size, seq_len, d_model = x.size()
+        assert d_model == self.config.d_model, f"Input dimension {d_model} doesn't match config {self.config.d_model}"
 
+        # Self-attention with proper tensor dimensions
+        next_kv = None
         def sa_sublayer(normed_x):
             nonlocal next_kv
+            # Ensure dimensions match before attention
+            assert normed_x.size(-1) == self.config.d_model, \
+                f"Expected dimension {self.config.d_model}, got {normed_x.size(-1)}"
+            
             out, new_kv = self.self_attn(
-                normed_x, normed_x, normed_x, 
-                attn_mask = src_mask,
+                normed_x, normed_x, normed_x,
+                attn_mask=src_mask,
                 past_key_value=past_key_value,
                 use_cache=use_cache
-
             )
             next_kv = new_kv
             return out
-        
-        x = self.self_attn_res(x, sa_sublayer)
 
+        x = self.self_attn_res(x, sa_sublayer)
+        
+        # Check dimensions after attention
+        assert x.size() == (batch_size, seq_len, self.config.d_model), \
+            f"Expected shape {(batch_size, seq_len, self.config.d_model)}, got {x.size()}"
+
+        # Feed-forward with residual connection
         x = self.ff_res(x, self.feed_forward)
+        
+        # Final dimension check
+        assert x.size() == (batch_size, seq_len, self.config.d_model), \
+            f"Expected shape {(batch_size, seq_len, self.config.d_model)}, got {x.size()}"
 
         return x, next_kv
-
 ###############################################################################
 # Decoder Block with Sparse Self-Attn + Cross-Attn + Checkpointing + Cache
 ###############################################################################
@@ -730,10 +686,24 @@ class Transformer(nn.Module):
         self.best_val_loss = float('inf')
 
     def _reset_parameters(self):
-        """Initialize parameters."""
-        for p in self.parameters():
+        """Enhanced parameter initialization."""
+        for name, p in self.named_parameters():
             if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+                if 'embedding' in name:
+                    # Special initialization for embeddings
+                    nn.init.normal_(p, mean=0.0, std=self.config.init_scale)
+                elif 'linear' in name or 'w_' in name:
+                    # Kaiming initialization for linear layers
+                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+                elif 'norm' in name:
+                    # Initialize layer norm weights to 1
+                    if 'weight' in name:
+                        nn.init.ones_(p)
+                    elif 'bias' in name:
+                        nn.init.zeros_(p)
+            else:
+                # Initialize biases to 0
+                nn.init.zeros_(p)
 
     def forward(
         self, 
@@ -743,55 +713,75 @@ class Transformer(nn.Module):
         tgt_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[Tuple]] = None,
         use_cache: bool = False
-    ):
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Tuple]]:
         """
-        Args:
-            src: shape (batch_size, src_seq_len)
-            tgt: shape (batch_size, tgt_seq_len), optional
-            attention_mask: Typically a padding mask for the encoder
-            tgt_mask: Typically a causal mask for the decoder
-            past_key_values: Optional list of cached key/value states
-            use_cache: If True, return new cache
+        Enhanced forward pass with numerical stability checks.
         """
-        # 1) Encode the source
-        enc_inp = self.embedding(src)
-        if not self.config.use_rope:
-            enc_inp = self.pos_encoding(enc_inp)
+        # 1. Input validation
+        if not src.isfinite().all():
+            src = torch.nan_to_num(src)
+            print("Warning: Non-finite values in source tokens")
         
-        # Handle encoder caching
-        encoder_past = None if past_key_values is None else past_key_values[0]
-        encoder_output, enc_past = self.encoder(
-            enc_inp,
-            src_mask=attention_mask,
-            past_key_values=encoder_past,
-            use_cache=use_cache
-        )
-
-        # 2) If tgt is provided, run the decoder
-        if tgt is not None:
-            dec_inp = self.embedding(tgt)
+        # 2. Embedding with gradient scaling
+        with torch.cuda.amp.autocast(enabled=self.config.use_mixed_precision):
+            enc_inp = self.embedding(src)
             if not self.config.use_rope:
-                dec_inp = self.pos_encoding(dec_inp)
+                enc_inp = self.pos_encoding(enc_inp)
             
-            # Handle decoder caching
-            decoder_past = None if past_key_values is None else past_key_values[1]
-            decoder_outputs, dec_past = self.decoder(
-                dec_inp,
-                encoder_output,
-                tgt_mask=tgt_mask,
+            # Add small noise to prevent degenerate embeddings
+            if self.training:
+                enc_inp = enc_inp + torch.randn_like(enc_inp) * 1e-5
+            
+            # 3. Monitor embedding values
+            if not enc_inp.isfinite().all():
+                print(f"Warning: Non-finite values after embedding")
+                print(f"Embedding stats - mean: {enc_inp.mean():.4f}, std: {enc_inp.std():.4f}")
+                enc_inp = torch.nan_to_num(enc_inp, nan=0.0, posinf=1e4, neginf=-1e4)
+            
+            # 4. Encoder forward pass
+            encoder_past = None if past_key_values is None else past_key_values[0]
+            encoder_output, enc_past = self.encoder(
+                enc_inp,
                 src_mask=attention_mask,
-                past_key_values=decoder_past,
+                past_key_values=encoder_past,
                 use_cache=use_cache
             )
-
-            logits = self.generator(decoder_outputs)
             
-            # Return both logits and cache if requested
-            if use_cache:
-                return logits, (enc_past, dec_past)
-            return logits
-        
-        return encoder_output
+            # 5. Monitor encoder output
+            if not encoder_output.isfinite().all():
+                print(f"Warning: Non-finite values in encoder output")
+                print(f"Encoder output stats - mean: {encoder_output.mean():.4f}, std: {encoder_output.std():.4f}")
+                encoder_output = torch.nan_to_num(encoder_output, nan=0.0, posinf=1e4, neginf=-1e4)
+            
+            # 6. Decoder and output generation (if needed)
+            if tgt is not None:
+                dec_inp = self.embedding(tgt)
+                if not self.config.use_rope:
+                    dec_inp = self.pos_encoding(dec_inp)
+                
+                decoder_past = None if past_key_values is None else past_key_values[1]
+                decoder_output, dec_past = self.decoder(
+                    dec_inp,
+                    encoder_output,
+                    tgt_mask=tgt_mask,
+                    src_mask=attention_mask,
+                    past_key_values=decoder_past,
+                    use_cache=use_cache
+                )
+                
+                # 7. Monitor decoder output
+                if not decoder_output.isfinite().all():
+                    print(f"Warning: Non-finite values in decoder output")
+                    decoder_output = torch.nan_to_num(decoder_output, nan=0.0, posinf=1e4, neginf=-1e4)
+                
+                # 8. Generate logits with stable scaling
+                logits = self.generator(decoder_output) / math.sqrt(self.config.d_model)
+                
+                if use_cache:
+                    return logits, (enc_past, dec_past)
+                return logits
+            
+            return encoder_output
 
     def configure_optimizer(self, config: TransformerConfig):
         """Configure optimizer with weight decay"""
@@ -821,42 +811,50 @@ class Transformer(nn.Module):
         )
         
         return optimizer
-
+    
     def training_step(self, batch, optimizer) -> Dict[str, float]:
-        """Single training step with mixed precision"""
-        self.train()
-        metrics = {}
-        
-        with torch.amp.autocast(enabled=self.config.use_mixed_precision):
-            # Forward pass
-            outputs = self(
-                src=batch['input_ids'],
-                tgt=batch['labels'],
-                src_mask=batch.get('attention_mask'),
-                tgt_mask=self._generate_square_subsequent_mask(batch['labels'].size(1)))
+            """Enhanced training step with gradient accumulation and stability checks."""
+            self.train()
+            metrics = {}
             
-            loss = self.compute_loss(outputs, batch['labels'])
-            metrics['loss'] = loss.item()
+            with torch.amp.autocast(enabled=self.config.use_mixed_precision):
+                # Forward pass
+                outputs = self(
+                    src=batch['input_ids'],
+                    tgt=batch['labels'],
+                    src_mask=batch.get('attention_mask'),
+                    tgt_mask=self._generate_square_subsequent_mask(batch['labels'].size(1))
+                )
+                
+                # Compute primary loss
+                loss = self.compute_loss(outputs, batch['labels'])
+                metrics['loss'] = loss.item()
+                
+                # Add regularization
+                if self.config.use_regularization:
+                    reg_loss = self.compute_regularization()
+                    loss = loss + reg_loss
+                    metrics['reg_loss'] = reg_loss.item()
             
-            # Add regularization if configured
-            if self.config.use_regularization:
-                reg_loss = self.compute_regularization()
-                loss += reg_loss
-                metrics['reg_loss'] = reg_loss.item()
-        
-        # Backward pass with gradient scaling
-        self.scaler.scale(loss).backward()
-        
-        self.scaler.unscale_(optimizer) #Unscale gradients before clipping.
-        # Gradient clipping
-        if self.config.max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.parameters(), self.config.max_grad_norm)
-        
-        self.scaler.step(optimizer)
-        self.scaler.update()
-        optimizer.zero_grad()
-        
-        return metrics
+            # Gradient scaling and backward pass
+            self.scaler.scale(loss).backward()
+            
+            # Unscale before clipping
+            self.scaler.unscale_(optimizer)
+            
+            # Gradient clipping with norm monitoring
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.parameters(), 
+                self.config.max_grad_norm
+            )
+            metrics['grad_norm'] = grad_norm.item()
+            
+            # Step with stability check
+            self.scaler.step(optimizer)
+            self.scaler.update()
+            optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+            
+            return metrics
 
     def validation_step(self, batch) -> Dict[str, float]:
         """Validation step with metrics collection"""
@@ -903,60 +901,47 @@ class Transformer(nn.Module):
         metrics['perplexity'] = torch.exp(self.compute_loss(outputs, labels))
         
         return metrics
-
+    
     def compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Compute cross entropy loss with improved numerical stability."""
-        # Validate shapes and values
-        if outputs.dim() != 3:
-            raise ValueError(f"Expected outputs shape (batch_size, seq_len, vocab_size), but got {outputs.shape}")  
-        if labels.dim() != 2:
-            raise ValueError(f"Expected labels shape (batch_size, seq_len), but got {labels.shape}")
-    
-        # Add eps to prevent log(0)
-        eps = 1e-8
-    
-        # Check for any infinite or NaN values
-        if torch.any(torch.isnan(outputs)) or torch.any(torch.isinf(outputs)):
-            print(f"Warning: Found NaN/Inf in model outputs! Max: {outputs.max()}, Min: {outputs.min()}")
-            # Clip values to prevent NaN/Inf propagation
+        """Enhanced loss computation with improved numerical stability."""
+        # Input validation
+        if not (outputs.isfinite().all() and labels.isfinite().all()):
             outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1e4, neginf=-1e4)
-    
-        # Ensure labels are within valid range
-        if torch.any(labels >= self.config.vocab_size):
-            print(f"Warning: Labels exceeded vocab size! Max label: {labels.max().item()}")
-            labels = torch.clamp(labels, 0, self.config.vocab_size - 1)
-    
-        # Ensure labels don't contain invalid negative values
-        if torch.any((labels < 0) & (labels != -100)):
-            raise ValueError(f"Found invalid negative label values! Min label: {labels.min().item()}")
-    
-        # Flatten tensors for loss calculation
-        flat_outputs = outputs.view(-1, outputs.size(-1))
-        flat_labels = labels.view(-1)
-
-        # Apply log softmax with improved numerical stability
-        log_probs = F.log_softmax(flat_outputs + eps, dim=-1)
-    
-        # Compute loss with optional label smoothing
-        label_smoothing = getattr(self.config, "label_smoothing", 0.0)
-    
-        loss = F.cross_entropy(
-            flat_outputs,
-            flat_labels,
-            ignore_index=self.config.pad_token_id,
-            label_smoothing=label_smoothing,
-            reduction='mean'
-        )
-    
-        # Check for NaN loss
-        if torch.isnan(loss):
-            print("Warning: NaN loss detected!")
-            print(f"Output stats - Mean: {outputs.mean():.4f}, Std: {outputs.std():.4f}")
-            print(f"Label stats - Min: {labels.min()}, Max: {labels.max()}")
-            # Return a small positive value instead of NaN to prevent training collapse
-            return torch.tensor(1.0, device=loss.device, requires_grad=True)
+        
+        batch_size, seq_len, vocab_size = outputs.shape
+        
+        # Convert to float32 for better numerical stability
+        outputs = outputs.float()
+        
+        # Apply gradient scaling
+        outputs = outputs / math.sqrt(self.config.d_model)
+        
+        # Compute log probabilities with improved numerical stability
+        log_probs = F.log_softmax(outputs, dim=-1, dtype=torch.float32)
+        
+        # Get target distributions
+        if self.config.label_smoothing > 0:
+            # Create smoothed target distribution
+            smooth_target = torch.full_like(log_probs, self.config.label_smoothing / (vocab_size - 1))
+            smooth_target.scatter_(-1, labels.unsqueeze(-1), 1.0 - self.config.label_smoothing)
+            loss = -(smooth_target * log_probs).sum(dim=-1)
+        else:
+            loss = F.nll_loss(log_probs.view(-1, vocab_size), 
+                             labels.view(-1),
+                             ignore_index=self.config.pad_token_id,
+                             reduction='none')
+            loss = loss.view(batch_size, seq_len)
+        
+        # Apply padding mask
+        pad_mask = (labels != self.config.pad_token_id).float()
+        loss = loss * pad_mask
+        
+        # Careful reduction
+        num_tokens = pad_mask.sum().clamp(min=1)
+        loss = loss.sum() / num_tokens
         
         return loss
+
         
     @staticmethod
     def get_scheduler(optimizer, config: TransformerConfig, num_training_steps: int):

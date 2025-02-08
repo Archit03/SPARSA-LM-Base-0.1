@@ -712,9 +712,6 @@ class Trainer:
                         tgt_mask=decoder_attention_mask
                 )
 
-                # Log model output shape
-                self.logger.info(f"Step {step} - Model Output Shape: {outputs.shape}")
-
                 # Flatten for cross-entropy loss
                 flat_outputs = outputs.view(-1, outputs.size(-1))
                 flat_labels = labels.view(-1)
