@@ -1,8 +1,8 @@
 training:
   device: "cuda"                  # Use "cuda" for GPU or "cpu" for CPU
-  epochs: 3                       # Number of training epochs
+  epochs: 5                       # Number of training epochs
   batch_size: 8                   # Mini-batch size
-  learning_rate: 0.00001          # Initial learning rate
+  learning_rate: 0.00005         # Initial learning rate
   weight_decay: 0.01              # Weight decay for regularization
   max_grad_norm: 0.5              # Gradient clipping threshold
   seed: 42                        # Random seed for reproducibility

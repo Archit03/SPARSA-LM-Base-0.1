@@ -526,119 +526,133 @@ class Trainer:
 
         for step, batch in enumerate(progress_bar):
             try:
+                # Always extract the necessary tensors
                 if "encoder_input_ids" in batch:
                     encoder_input_ids = batch["encoder_input_ids"].to(self.device)
                     encoder_attention_mask = batch["encoder_attention_mask"].to(self.device)
                     decoder_input_ids = batch["decoder_input_ids"].to(self.device)
                     decoder_attention_mask = batch["decoder_attention_mask"].to(self.device)
                     labels = batch["labels"].to(self.device)
-
-                    """
-                    self.logger.info(f"\nStep {step} - Input Shapes:")
-                    self.logger.info(f"encoder_input_ids: {encoder_input_ids.shape}")
-                    self.logger.info(f"encoder_attention_mask: {encoder_attention_mask.shape}")
-                    self.logger.info(f"decoder_input_ids: {decoder_input_ids.shape}")
-                    self.logger.info(f"decoder_attention_mask: {decoder_attention_mask.shape}")
-                    self.logger.info(f"labels: {labels.shape}")
-                    """
-
                 else:
-                    self.logger.info(f"\nStep {step} - Tensor states")
-                    debug_tensor_values(encoder_input_ids, "encoder_input_ids", self.logger)
-                    debug_tensor_values(encoder_attention_mask, "encoder_attention_mask", self.logger)
-                    debug_tensor_values(labels, "labels", self.logger)
+                    # Log error or skip the batch if the keys are missing
+                    self.logger.error(f"Batch at step {step} is missing required keys.")
+                    continue
 
-                    if decoder_input_ids is not None:
-                        decoder_attention_mask = Transformer._generate_square_subsequent_mask(decoder_input_ids.size(1)).to(self.device)
-                        outputs = self.model(
-                                src=encoder_input_ids,
-                                tgt=decoder_input_ids,
-                                attention_mask=encoder_attention_mask,
-                                tgt_mask=decoder_attention_mask
-                        )
-                    else:
-                        outputs = self.model(
-                            input_ids=encoder_input_ids,
-                            attention_mask=encoder_attention_mask,
-                        )
-                    
-                    if outputs.size(-1) != self.model.config.vocab_size:
-                        self.logger.warning(
-                            f"Outputs last dimension {outputs.size(-1)} does not match vocab_size {self.model.config.vocab_size}. Slicing outputs."
-                        )
-                        outputs = outputs[..., :self.model.config.vocab_size]   
-                    self.logger.info(f"Model outputs shape: {outputs.shape}")
-                    
-                    outputs = torch.clamp(outputs, min=-1e9, max=1e9) 
+                # Optional: Debug/log tensor shapes here if needed.
+                # self.logger.info(f"encoder_input_ids: {encoder_input_ids.shape}")
+                # self.logger.info(f"decoder_input_ids: {decoder_input_ids.shape}")
+                # self.logger.info(f"labels: {labels.shape}")
 
-                    labels = torch.where(labels != -100, torch.clamp(labels, 0, self.model.config.vocab_size - 1), labels) #Clamp labels, so the training is more stable. 
-
-                    self.logger.info(f"Outputs after processing: {outputs.shape}")
-                    self.logger.info(f"Labels after processing: {labels.shape}")
-
-                    flat_outputs, flat_labels = debug_loss_inputs(
-                        outputs,
-                        labels,
-                        self.model.config.vocab_size,
-                        self.logger
+                # Run the model forward pass:
+                if decoder_input_ids is not None:
+                    # Generate a decoder attention mask if needed
+                    decoder_attention_mask = Transformer._generate_square_subsequent_mask(decoder_input_ids.size(1)).to(self.device)
+                    outputs = self.model(
+                        src=encoder_input_ids,
+                        tgt=decoder_input_ids,
+                        attention_mask=encoder_attention_mask,
+                        tgt_mask=decoder_attention_mask
+                    )
+                else:
+                    outputs = self.model(
+                        input_ids=encoder_input_ids,
+                        attention_mask=encoder_attention_mask,
                     )
 
-                    if flat_outputs is None or flat_labels is None:
-                        raise ValueError("Invalid outputs/labels for loss calculation (debug checks failed).")
-                    
-                    debug_tensor_values(flat_outputs, "flat_outputs", self.logger)
-                    debug_tensor_values(flat_labels, "flat_labels", self.logger)
- 
-                    # Ensure labels are within the correct range
-                    if torch.any(flat_labels < -100) or torch.any(flat_labels >= self.model.config.vocab_size):
-                        self.logger.error(f"Labels out of bounds! Min: {flat_labels.min().item()}, Max: {flat_labels.max().item()}")
-                        raise ValueError("Detected invalid label values before loss calculation.")
-                    
-                    outputs = torch.clamp(outputs, min=-1e9, max=1e9)
-                   
-                    loss = self.criterion(flat_outputs, flat_labels)
-                    if torch.isnan(loss) or torch.isinf(loss):
-                        self.logger.error("NaN or Inf detected in loss! Skipping this step....")
-                        continue
-                    accum_loss += loss.item()
-                    loss = loss / self.gradient_accumulation_steps # Gradient accumulation
+                # Check and adjust outputs shape if needed
+                if outputs.size(-1) != self.model.config.vocab_size:
+                    self.logger.warning(
+                        f"Outputs last dimension {outputs.size(-1)} does not match vocab_size {self.model.config.vocab_size}. Slicing outputs."
+                    )
+                    outputs = outputs[..., :self.model.config.vocab_size]
+                self.logger.info(f"Model outputs shape: {outputs.shape}")
 
-                    # Mixed precision training, backpropagation, and gradient scaling
-                    self.scaler.scale(loss).backward()
-                    accumulation_counter += 1
+                # Clamp outputs for numerical stability
+                outputs = torch.clamp(outputs, min=-1e9, max=1e9)
 
-                    if accumulation_counter ==  self.gradient_accumulation_steps:
-                        #Unscale the gradients
-                        self.scaler.unscale_(self.optimizer)
+                # Clamp labels to be within valid range (ignoring -100 values)
+                labels = torch.where(
+                    labels != -100,
+                    torch.clamp(labels, 0, self.model.config.vocab_size - 1),
+                    labels
+                )
+                self.logger.info(f"Outputs after processing: {outputs.shape}")
+                self.logger.info(f"Labels after processing: {labels.shape}")
 
-                        # Clip gradients for stability
-                        clip_grad_norm_(
-                            self.model.parameters(), 
-                            self.config['training'].get('max_grad_norm', 1.0)
-                            )
-                        
-                        #Optimizer step
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        self.scheduler.step()
+                # Flatten outputs and labels for loss calculation
+                flat_outputs, flat_labels = debug_loss_inputs(
+                    outputs,
+                    labels,
+                    self.model.config.vocab_size,
+                    self.logger
+                )
 
-                        # Zero gradients properly
-                        self.optimizer.zero_grad(set_to_none=True)
-                        total_loss += accum_loss
-                        step_in_epoch += 1
+                if flat_outputs is None or flat_labels is None:
+                    raise ValueError("Invalid outputs/labels for loss calculation (debug checks failed).")
 
-                        # Log training metrics
-                        current_loss = accum_loss / self.gradient_accumulation_steps
-                        self._log_training_metrics(current_loss, step_in_epoch, epoch + 1)
+                # Optional: Debug tensor values
+                debug_tensor_values(flat_outputs, "flat_outputs", self.logger)
+                debug_tensor_values(flat_labels, "flat_labels", self.logger)
 
-                        #Reset accumulation counter and loss
-                        accum_loss  = 0.0
-                        accumulation_counter = 0
+                # Ensure labels are within the correct range
+                if torch.any(flat_labels < -100) or torch.any(flat_labels >= self.model.config.vocab_size):
+                    self.logger.error(f"Labels out of bounds! Min: {flat_labels.min().item()}, Max: {flat_labels.max().item()}")
+                    raise ValueError("Detected invalid label values before loss calculation.")
 
-                        progress_bar.set_postfix({
-                            "loss": current_loss,
-                            "lr" : self.scheduler.get_last_lr()[0]
-                        })
+                # Clamp outputs again if necessary
+                outputs = torch.clamp(outputs, min=-1e9, max=1e9)
+
+                # Compute loss
+                loss = self.criterion(flat_outputs, flat_labels)
+                if torch.isnan(loss) or torch.isinf(loss):
+                    self.logger.error("NaN or Inf detected in loss! Skipping this step....")
+                    continue
+
+                accum_loss += loss.item()
+                loss = loss / self.gradient_accumulation_steps  # Apply gradient accumulation
+
+                # Mixed precision training: backward pass with scaling
+                self.scaler.scale(loss).backward()
+                accumulation_counter += 1
+
+                if accumulation_counter == self.gradient_accumulation_steps:
+                    # Unscale and clip gradients
+                    self.scaler.unscale_(self.optimizer)
+                    clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config['training'].get('max_grad_norm', 1.0)
+                    )
+                    # Log Parameter Updates (AFTER optimizer step, BEFORE zeroing gradients)
+                    for name, param in self.model.named_parameters():
+                        if param.grad is not None:
+                            print(f"{name} grad norm: {torch.norm(param.grad).item():.6f}")
+
+                    # Optimizer and scheduler steps
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.scheduler.step()
+
+                    for name, param in self.model.named_parameters():
+                         if param.requires_grad:
+                            print(f"{name}: Mean Value = {torch.mean(param).item():.6f}")
+
+                    # Zero gradients
+                    self.optimizer.zero_grad(set_to_none=True)
+                    total_loss += accum_loss
+                    step_in_epoch += 1
+
+                    # Log training metrics
+                    current_loss = accum_loss / self.gradient_accumulation_steps
+                    self._log_training_metrics(current_loss, step_in_epoch, epoch + 1)
+
+                    # Reset accumulation counters
+                    accum_loss = 0.0
+                    accumulation_counter = 0
+
+                    progress_bar.set_postfix({
+                        "loss": current_loss,
+                        "lr": self.scheduler.get_last_lr()[0]
+                    })
 
             except RuntimeError as re:
                 if "CUDA out of memory" in str(re):
@@ -650,9 +664,10 @@ class Trainer:
             except Exception as e:
                 self.logger.error(f"Error in training loop: {e}")
                 raise e
+
         avg_loss = total_loss / step_in_epoch if step_in_epoch > 0 else 0.0
         return avg_loss, self._calculate_perplexity(avg_loss)
-    
+
     @torch.no_grad()
     def validate(self, epoch: int) -> Tuple[float, float]:
         """
