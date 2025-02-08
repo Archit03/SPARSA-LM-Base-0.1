@@ -363,7 +363,7 @@ class HybridTokenizationStrategy:
         if task_type == 'auto':
             # Analyze text to determine best strategy
             avg_length = sum(len(text.split()) for text in texts) / len(texts)
-            task_type = 'bi' if avg_length < 512 else 'auto'  # Use bidirectional for shorter texts
+            task_type = 'bi' if avg_length < 64 else 'auto'  # Use bidirectional for shorter texts
 
         try:
             with self.memory_manager.monitor_memory(f"{task_type} encoding"):
@@ -551,7 +551,7 @@ class MedicalTokenizer:
         min_frequency: int = 2,
         padding_strategy: str = 'longest',
         truncation_strategy: str = 'longest_first',
-        max_length: int = 512,
+        max_length: int = 128,
         normalize: bool = True
     ):
         # Initialize tokenizer with BPE model and special tokens

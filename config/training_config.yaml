@@ -1,65 +1,69 @@
 training:
-  device: "cuda"                  # Use "cuda" for GPU or "cpu" for CPU
-  epochs: 5                       # Number of training epochs
-  batch_size: 8                   # Mini-batch size
-  learning_rate: 0.00005         # Initial learning rate
-  weight_decay: 0.01              # Weight decay for regularization
-  max_grad_norm: 0.5              # Gradient clipping threshold
-  seed: 42                        # Random seed for reproducibility
-  resume_from_checkpoint: null    # Path to checkpoint to resume from, or null
-  checkpoint_dir: "checkpoints"   # Directory to store checkpoints
-  checkpoint_save_frequency: 1    # Save checkpoint every N epochs
-  scheduler_type: "linear"        # LR scheduler type ("linear" or "cosine")
-  warmup_ratio: 0.2               # Fraction of total steps to warm up the LR
-  gradient_accumulation_steps: 2  # Accumulate gradients over multiple steps
-  log_every_n_steps: 5            # Frequency of logging within each epoch
-  eval_every_n_epochs: 1          # Evaluate model every N epochs
-  early_stopping_patience: 2      # Stop training if val loss doesn’t improve for N eval cycles
-  use_mixed_precision: false      # Whether to use AMP for faster training
-  amp_scaler_init_scale: 8192     # AMP scaler initial scale (irrelevant if above is false)
+  device: "cuda"
+  epochs: 5              
+  batch_size: 4         
+  learning_rate: 0.0002  
+  weight_decay: 0.01     
+  max_grad_norm: 1.0     
+  gradient_accumulation_steps: 16  
+  seed: 42               
+  resume_from_checkpoint: null
+  checkpoint_dir: "checkpoints"
+  checkpoint_save_frequency: 1
+  scheduler_type: "cosine_with_min_lr"
+  lr_scheduler_kwargs:
+    min_lr: 1e-6 
+  warmup_ratio: 0.1               
+  log_every_n_steps: 10
+  eval_every_n_epochs: 1
+  early_stopping_patience: 3
+  use_mixed_precision: true        
+  amp_scaler_init_scale: 32768     
+  use_gradient_checkpointing: true 
 
 dataset:
-  train_dataset: "local_data"     # Path/directory for your training data
-  max_seq_len: 64                 # Sequence length for training/validation
-  num_workers: 2                  # Number of workers for data loading
-  shuffle: true                   # Shuffle the training data
+  train_dataset: "local_data"
+  max_seq_len: 128       
+  num_workers: 2         
+  shuffle: true
   preprocessing:
-    lowercase: true               # Convert input text to lowercase
-    min_length: 5                 # Minimum text length for a sample
+    lowercase: true
+    min_length: 5
   split:
-    test_size: 0.2                # Fraction of data to reserve for validation/test
-    random_state: 42              # Seed for data splitting
+    test_size: 0.2
+    random_state: 42
 
 tokenizer:
   path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer"
   add_special_tokens: true
-  vocab_size: 512                 # Reduced vocab size for quick tests
 
 model:
-  num_layers: 1                   # Number of encoder/decoder layers each
-  num_heads: 1                    # Single attention head
-  hidden_dim: 64                  # Hidden dimension size (d_model)
-  ff_dim: 128                     # Feedforward dimension size
-  dropout: 0.1                    # Dropout probability
-  vocab_size: 512                 # Should match tokenizer's vocab_size
-  max_seq_len: 64                 # Maximum sequence length
-  use_checkpointing: false        # Disable gradient checkpointing
-  activation: "relu"              # Activation function
-  tie_embeddings: true            # Tie input/output embeddings
+  hidden_dim: 144        # ✅ Reduced to fit 2M parameters
+  num_layers: 4          # ✅ Reduced from 6 to 4
+  num_heads: 6           # ✅ Reduced from 8 to 6
+  ff_dim: 768              # ✅ Reduced from 1024 to 768
+  dropout: 0.1          
+  vocab_size: 4000      
+  max_seq_len: 128      
+  use_checkpointing: true  
+  activation: "gelu"    
+  tie_embeddings: true
+  window_size: 4        
+  global_tokens: 0      
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: false                # Disable Weights & Biases
-  wandb_project: "LuminaLM_Test"
+  use_wandb: true
+  wandb_project: "LuminaLM_Base_2M"
   wandb_entity: null
-  log_gradients: false
-  log_model_weights: false
+  log_gradients: true
+  log_model_weights: true
   log_train_steps: true
-  log_frequency: 50               # Log every 50 steps
-  gradient_logging_frequency: 500 # Log gradient stats every 500 steps
+  log_frequency: 100
+  gradient_logging_frequency: 1000
 
 memory_monitor:
   enabled: true
   log_frequency: 10
   monitor_gpu: true
-  monitor_cpu: true
+  monitor_cpu: true  

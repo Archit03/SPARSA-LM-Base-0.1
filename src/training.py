@@ -240,6 +240,11 @@ class Trainer:
                 collate_fn=TextDataset.collate_fn,
                 drop_last=self.config['training'].get('drop_last', False)
             )
+            scheduler_type = self.config['training']['scheduler_type']
+            lr_scheduler_kwargs = self.config['training'].get('lr_scheduler_kwargs', {})
+
+            if scheduler_type == "cosine_with_min_lr":
+                    min_lr = self.config['training']['lr_scheduler_kwargs'].get('min_lr', 1e-6)
 
             # Model configuration and initialization
             checkpointing_params = self.config['model'].get('checkpointing_params', {})
@@ -257,7 +262,8 @@ class Trainer:
                 prenorm=self.config['model'].get('prenorm', True),
                 vocab_size=self.config['model']['vocab_size'],
                 tie_embeddings=self.config['model'].get('tie_embeddings', False),
-                scheduler_type=self.config['training']['scheduler_type'],
+                scheduler_type=scheduler_type,  
+                lr_scheduler_kwargs=lr_scheduler_kwargs,
                 learning_rate=self.config['training']['learning_rate'],
                 weight_decay=self.config['training']['weight_decay'],
                 warmup_ratio=self.config['training'].get('warmup_ratio', 0.1),
@@ -269,15 +275,19 @@ class Trainer:
                 use_reentrant=checkpointing_params.get('use_reentrant', False)
             )
             self.model = Transformer(model_config).to(self.config['training']['device'])
+            self.optimizer = self._configure_optimizer()
+            num_training_steps = len(self.train_loader) * self.config['training']['epochs']
 
             # Optimizer, scheduler, and loss
             self.optimizer = self._configure_optimizer()
             num_training_steps = len(self.train_loader) * self.config['training']['epochs']
             self.scheduler = get_scheduler(
-                name=self.config['training']['scheduler_type'],
+                name=scheduler_type,
                 optimizer=self.optimizer,
                 num_warmup_steps=int(num_training_steps * self.config['training'].get('warmup_ratio')),
-                num_training_steps=num_training_steps
+                num_training_steps=num_training_steps,
+                **lr_scheduler_kwargs,
+                **min_lr
             )
             self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
 

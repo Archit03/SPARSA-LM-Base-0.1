@@ -46,6 +46,7 @@ class TransformerConfig:
         weight_decay: float = 0.1,
         warmup_ratio: float = 0.1,
         scheduler_type: str = "cosine_warmup",
+        lr_scheduler_kwargs: float = 1e-6,
 
         init_scale: float = 0.02,
         layer_norm_eps: float = 1e-5,
@@ -100,6 +101,7 @@ class TransformerConfig:
         self.weight_decay = weight_decay
         self.warmup_ratio = warmup_ratio
         self.scheduler_type = scheduler_type
+        self.lr_scheduler_kwargs = lr_scheduler_kwargs
         
         # Special Tokens
         self.pad_token_id = pad_token_id
@@ -953,6 +955,7 @@ class Transformer(nn.Module):
                 num_warmup_steps=num_warmup_steps,
                 num_training_steps=num_training_steps
             )
+        
 
     @staticmethod
     def _generate_square_subsequent_mask(sz: int) -> torch.Tensor:
