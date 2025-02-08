@@ -1,63 +1,62 @@
 training:
-  device: "cuda"         # Use "cuda" for GPU or "cpu" for CPU
-  epochs: 3              # Fewer epochs for quick testing
-  batch_size: 8          # Balanced batch size for small-scale testing
-  learning_rate: 0.00001 # Slightly higher learning rate for faster convergence
-  weight_decay: 0.01     # Weight decay for AdamW optimizer
-  max_grad_norm: 0.5     # Gradient clipping threshold
-  seed: 42               # Random seed for reproducibility
-  resume_from_checkpoint: null
-  checkpoint_dir: "checkpoints"
-  checkpoint_save_frequency: 1
-  scheduler_type: "linear"
-  warmup_ratio: 0.2     # Reduced warmup steps
-  gradient_accumulation_steps: 2  # Faster updates with smaller model
-  log_every_n_steps: 5
-  eval_every_n_epochs: 1
-  early_stopping_patience: 2
-  use_mixed_precision: false
-  amp_scaler_init_scale: 8192  # Further reduced for stability in small models
+  device: "cuda"                  # Use "cuda" for GPU or "cpu" for CPU
+  epochs: 3                       # Number of training epochs
+  batch_size: 8                   # Mini-batch size
+  learning_rate: 0.00001          # Initial learning rate
+  weight_decay: 0.01              # Weight decay for regularization
+  max_grad_norm: 0.5              # Gradient clipping threshold
+  seed: 42                        # Random seed for reproducibility
+  resume_from_checkpoint: null    # Path to checkpoint to resume from, or null
+  checkpoint_dir: "checkpoints"   # Directory to store checkpoints
+  checkpoint_save_frequency: 1    # Save checkpoint every N epochs
+  scheduler_type: "linear"        # LR scheduler type ("linear" or "cosine")
+  warmup_ratio: 0.2               # Fraction of total steps to warm up the LR
+  gradient_accumulation_steps: 2  # Accumulate gradients over multiple steps
+  log_every_n_steps: 5            # Frequency of logging within each epoch
+  eval_every_n_epochs: 1          # Evaluate model every N epochs
+  early_stopping_patience: 2      # Stop training if val loss doesn’t improve for N eval cycles
+  use_mixed_precision: false      # Whether to use AMP for faster training
+  amp_scaler_init_scale: 8192     # AMP scaler initial scale (irrelevant if above is false)
 
 dataset:
-  train_dataset: "local_data"
-  max_seq_len: 64   # Reduced sequence length for efficiency
-  num_workers: 2    # Increased for faster data loading
-  shuffle: true
+  train_dataset: "local_data"     # Path/directory for your training data
+  max_seq_len: 64                 # Sequence length for training/validation
+  num_workers: 2                  # Number of workers for data loading
+  shuffle: true                   # Shuffle the training data
   preprocessing:
-    lowercase: true
-    min_length: 5
+    lowercase: true               # Convert input text to lowercase
+    min_length: 5                 # Minimum text length for a sample
   split:
-    test_size: 0.2
-    random_state: 42
+    test_size: 0.2                # Fraction of data to reserve for validation/test
+    random_state: 42              # Seed for data splitting
 
 tokenizer:
   path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer"
   add_special_tokens: true
-  vocab_size: 512  # Reduced vocabulary size for testing
+  vocab_size: 512                 # Reduced vocab size for quick tests
 
 model:
-  # 1 layer encoder, 1 layer decoder
-  num_layers: 1
-  num_heads: 1
-  hidden_dim: 64    # Small hidden dimension for efficiency
-  ff_dim: 128       # Reduced feedforward size
-  dropout: 0.1
-  vocab_size: 512   # Matches tokenizer vocab size
-  max_seq_len: 64   # Matches reduced sequence length
-  use_checkpointing: false  # Disabled for quick testing
-  activation: "relu"
-  tie_embeddings: true
+  num_layers: 1                   # Number of encoder/decoder layers each
+  num_heads: 1                    # Single attention head
+  hidden_dim: 64                  # Hidden dimension size (d_model)
+  ff_dim: 128                     # Feedforward dimension size
+  dropout: 0.1                    # Dropout probability
+  vocab_size: 512                 # Should match tokenizer's vocab_size
+  max_seq_len: 64                 # Maximum sequence length
+  use_checkpointing: false        # Disable gradient checkpointing
+  activation: "relu"              # Activation function
+  tie_embeddings: true            # Tie input/output embeddings
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: false   # Disabled WandB for minimal overhead
+  use_wandb: false                # Disable Weights & Biases
   wandb_project: "LuminaLM_Test"
   wandb_entity: null
   log_gradients: false
   log_model_weights: false
   log_train_steps: true
-  log_frequency: 50
-  gradient_logging_frequency: 500
+  log_frequency: 50               # Log every 50 steps
+  gradient_logging_frequency: 500 # Log gradient stats every 500 steps
 
 memory_monitor:
   enabled: true

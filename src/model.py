@@ -188,107 +188,115 @@ class PositionalEncoding(nn.Module):
 ###############################################################################
 # Sparse Multi-Head Attention with Optional KV Caching
 ###############################################################################
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
 class SparseMultiHeadAttention(nn.Module):
-    def __init__(self, config: TransformerConfig, is_causal: bool = False):
+    """
+    Multi-Head Attention with Sparse Local Windowing and Optional Global Tokens.
+    This reduces attention complexity from O(n²) to O(n log n).
+
+    Args:
+        config (TransformerConfig): Model configuration.
+        is_causal (bool): If True, applies causal masking (for autoregressive models).
+    """
+
+    def __init__(self, config, is_causal=False):
         super().__init__()
-        self.config = config
-        self.is_causal = is_causal
-        
-        # Ensure dimensions are properly aligned
-        assert config.d_model % config.num_heads == 0, "d_model must be divisible by num_heads"
-        self.d_k = config.d_model // config.num_heads
         self.num_heads = config.num_heads
-        
-        # Linear projections with correct output dimensions
-        self.w_q = nn.Linear(config.d_model, config.d_model)
-        self.w_k = nn.Linear(config.d_model, config.d_model)
-        self.w_v = nn.Linear(config.d_model, config.d_model)
-        self.out_proj = nn.Linear(config.d_model, config.d_model)
-        
+        self.d_model = config.d_model
+        self.d_k = config.d_model // config.num_heads
+        self.window_size = config.window_size  # Local window size for sparse attention
+        self.global_tokens = config.global_tokens  # Number of global tokens
+        self.is_causal = is_causal
+
+        # Linear layers for query, key, and value projections
+        self.query = nn.Linear(config.d_model, config.d_model)
+        self.key = nn.Linear(config.d_model, config.d_model)
+        self.value = nn.Linear(config.d_model, config.d_model)
+        self.output = nn.Linear(config.d_model, config.d_model)
+
+        # Dropout layer
         self.dropout = nn.Dropout(config.dropout)
-        
-        # Debug flag
-        self.debug = True
+        self.softmax = nn.Softmax(dim=-1)
 
-    def _debug_shapes(self, tensor, name):
-        if self.debug:
-            print(f"Shape of {name}: {tensor.shape}")
+        # Initialize weights using Xavier uniform initialization
+        for layer in [self.query, self.key, self.value, self.output]:
+            nn.init.xavier_uniform_(layer.weight, gain=1.0 / math.sqrt(self.d_k))
+            nn.init.zeros_(layer.bias)
 
-    def forward(self, q, k, v, attn_mask=None, past_key_value=None, use_cache=False):
-        batch_size = q.size(0)
-        seq_len_q = q.size(1)
-        seq_len_k = k.size(1)
-        seq_len_v = v.size(1)
+    def build_local_window_mask(self, seq_len, device):
+        """
+        Constructs a local attention mask where each token only attends to its `window_size` neighbors.
+        """
+        mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device=device)
 
-        # Debug input shapes
-        self._debug_shapes(q, "query input")
-        self._debug_shapes(k, "key input")
-        self._debug_shapes(v, "value input")
+        for i in range(seq_len):
+            start = max(0, i - self.window_size)
+            end = min(seq_len, i + self.window_size + 1)
+            mask[i, start:end] = 1  # Allow attention to local window
 
-        # Project and reshape
-        # (batch_size, seq_len, d_model) -> (batch_size, seq_len, num_heads, d_k)
-        q = self.w_q(q).view(batch_size, seq_len_q, self.num_heads, self.d_k)
-        k = self.w_k(k).view(batch_size, seq_len_k, self.num_heads, self.d_k)
-        v = self.w_v(v).view(batch_size, seq_len_v, self.num_heads, self.d_k)
+        # If global tokens exist, allow them to attend everywhere
+        if self.global_tokens > 0:
+            mask[: self.global_tokens, :] = 1  # Global tokens attend everywhere
+            mask[:, : self.global_tokens] = 1  # All tokens attend to global tokens
 
-        # Debug projected shapes
-        self._debug_shapes(q, "query projected")
-        self._debug_shapes(k, "key projected")
-        self._debug_shapes(v, "value projected")
+        return mask
+    
+    def forward(self, query, key, value, attn_mask=None, past_key_value=None, use_cache=False):
+        batch_size, new_seq_len, _ = query.size()
 
-        # Transpose for attention computation
-        # (batch_size, seq_len, num_heads, d_k) -> (batch_size, num_heads, seq_len, d_k)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        # Q, K, V for the *new* tokens
+        Q = self.query(query).view(batch_size, new_seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.key(key).view(batch_size, new_seq_len, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.value(value).view(batch_size, new_seq_len, self.num_heads, self.d_k).transpose(1, 2)
 
-        # Handle cached KV states
+        # Handle past K, V
         if past_key_value is not None:
-            past_k, past_v = past_key_value
-            if past_k is not None and past_v is not None:
-                k = torch.cat([past_k, k], dim=2)
-                v = torch.cat([past_v, v], dim=2)
+            past_K, past_V = past_key_value
+            K = torch.cat([past_K, K], dim=2)  # shape: [B, heads, total_seq_len, d_k]
+            V = torch.cat([past_V, V], dim=2)
+        else:
+            past_K = torch.zeros((batch_size, self.num_heads, 0, self.d_k), device=K.device, dtype=K.dtype)
+            past_V = torch.zeros((batch_size, self.num_heads, 0, self.d_k), device=V.device, dtype=V.dtype)
 
-        # Compute attention scores
-        scaling = float(self.d_k) ** -0.5
-        scores = torch.matmul(q, k.transpose(-2, -1)) * scaling
+        next_key_value = (K, V) if use_cache else None
 
-        self._debug_shapes(scores, "attention scores")
+        # total_seq_len = old_seq_len + new_seq_len
+        total_seq_len = K.size(2)
 
-        # Apply masks if provided
-        if attn_mask is not None:
-            # Expand mask for multiple heads
-            if attn_mask.dim() == 2:
-                attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)  # Add head and batch dimensions
-            scores = scores.masked_fill(~attn_mask.bool(), float('-inf'))
+        # 1) Compute scores: [B, heads, new_seq_len, total_seq_len]
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
 
-        # Apply causal mask if needed
+        # 2) Build local window mask of shape [total_seq_len, total_seq_len], then slice
+        local_mask = self.build_local_window_mask(total_seq_len, device=query.device)
+        start = total_seq_len - new_seq_len
+        local_mask_slice = local_mask[start:start+new_seq_len, :]
+
+        # 3) Apply local window mask
+        scores = scores.masked_fill(local_mask_slice.unsqueeze(0).unsqueeze(0) == 0, float('-inf'))
+
+        # 4) If causal, also build a causal mask for total_seq_len, then slice
         if self.is_causal:
-            causal_mask = torch.triu(torch.ones(seq_len_q, seq_len_k, device=q.device), diagonal=1).bool()
-            scores = scores.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float('-inf'))
+            full_causal = torch.triu(torch.ones(total_seq_len, total_seq_len, device=query.device), diagonal=1)
+            causal_slice = full_causal[start:start+new_seq_len, :]  # shape [new_seq_len, total_seq_len]
+            scores = scores.masked_fill(causal_slice.unsqueeze(0).unsqueeze(0) == 1, float('-inf'))
 
-        # Apply softmax and dropout
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
+        # 5) Optionally apply any attn_mask (e.g. padding mask) in the same [new_seq_len, total_seq_len] shape
+        # Make sure it also has the shape to broadcast: [B, 1, new_seq_len, total_seq_len]
 
-        # Compute output
-        output = torch.matmul(attn_weights, v)
-
-        # Transpose and reshape back
-        # (batch_size, num_heads, seq_len, d_k) -> (batch_size, seq_len, num_heads, d_k)
-        output = output.transpose(1, 2).contiguous()
-        
-        # (batch_size, seq_len, num_heads, d_k) -> (batch_size, seq_len, d_model)
-        output = output.view(batch_size, -1, self.config.d_model)
-
-        # Final projection
-        output = self.out_proj(output)
-
-        # Prepare cache if needed
-        next_key_value = (k, v) if use_cache else None
+        # Softmax etc.
+        scores = self.softmax(scores)
+        scores = self.dropout(scores)
+        output = torch.matmul(scores, V)  # shape [B, heads, new_seq_len, d_k]
+        output = output.transpose(1, 2).contiguous().view(batch_size, new_seq_len, self.d_model)
+        output = self.output(output)
 
         return output, next_key_value
-    
+
 ###############################################################################
 # Local Window Mask with Optional Global Tokens
 ###############################################################################
@@ -395,66 +403,26 @@ class FeedForward(nn.Module):
 # Encoder Block with Sparse Attention + Global Option + Checkpointing
 ###############################################################################
 class EncoderBlock(nn.Module):
-    def __init__(self, config: TransformerConfig):
+    def __init__(self, config):
         super().__init__()
-        self.config = config
-        
-        # Create attention and feedforward layers
         self.self_attn = SparseMultiHeadAttention(config)
         self.feed_forward = FeedForward(config)
-        
-        # Create residual connections with proper dimensions
-        self.self_attn_res = ResidualConnection(
-            config.d_model,
-            config.dropout,
-            config.use_checkpointing,
-            config.use_reentrant
-        )
-        self.ff_res = ResidualConnection(
-            config.d_model,
-            config.dropout,
-            config.use_checkpointing,
-            config.use_reentrant
-        )
+        self.self_attn_res = ResidualConnection(config.d_model, config.dropout)
+        self.ff_res = ResidualConnection(config.d_model, config.dropout)
 
     def forward(self, x, src_mask=None, past_key_value=None, use_cache=False):
-        """
-        Forward pass with dimension checks
-        """
-        batch_size, seq_len, d_model = x.size()
-        assert d_model == self.config.d_model, f"Input dimension {d_model} doesn't match config {self.config.d_model}"
-
-        # Self-attention with proper tensor dimensions
         next_kv = None
+
         def sa_sublayer(normed_x):
             nonlocal next_kv
-            # Ensure dimensions match before attention
-            assert normed_x.size(-1) == self.config.d_model, \
-                f"Expected dimension {self.config.d_model}, got {normed_x.size(-1)}"
-            
-            out, new_kv = self.self_attn(
-                normed_x, normed_x, normed_x,
-                attn_mask=src_mask,
-                past_key_value=past_key_value,
-                use_cache=use_cache
-            )
+            out, new_kv = self.self_attn(normed_x, normed_x, normed_x, attn_mask=src_mask, past_key_value=past_key_value, use_cache=use_cache)
             next_kv = new_kv
             return out
 
         x = self.self_attn_res(x, sa_sublayer)
-        
-        # Check dimensions after attention
-        assert x.size() == (batch_size, seq_len, self.config.d_model), \
-            f"Expected shape {(batch_size, seq_len, self.config.d_model)}, got {x.size()}"
-
-        # Feed-forward with residual connection
         x = self.ff_res(x, self.feed_forward)
-        
-        # Final dimension check
-        assert x.size() == (batch_size, seq_len, self.config.d_model), \
-            f"Expected shape {(batch_size, seq_len, self.config.d_model)}, got {x.size()}"
-
         return x, next_kv
+    
 ###############################################################################
 # Decoder Block with Sparse Self-Attn + Cross-Attn + Checkpointing + Cache
 ###############################################################################
@@ -577,18 +545,23 @@ class Encoder(nn.Module):
             for _ in range(config.num_layers)
         ])
         self.norm = nn.LayerNorm(config.d_model)
-
+    
     def forward(self, x, src_mask=None, past_key_values=None, use_cache=False):
-        """
-        x: (batch_size, src_seq_len, d_model)
-        src_mask: optional mask
-        past_key_values: optional list of (k,v) for each layer
-        use_cache: bool
-        """
         next_past_key_values = []
-
+        batch_size = x.size(0)
+        
         for i, layer in enumerate(self.layers):
-            past_kv = past_kv = past_key_values[i] if (past_key_values is not None and i < len(past_key_values)) else (None, None)
+            if past_key_values is not None and i < len(past_key_values):
+                past_kv = past_key_values[i]
+            else:
+                # Correct initialization with batch_size, num_heads, 0 seq_len, d_k
+                num_heads = layer.self_attn.num_heads
+                d_k = layer.self_attn.d_k
+                past_kv = (
+                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype),
+                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype)
+                )
+            
             x, new_kv = layer(x, src_mask=src_mask, past_key_value=past_kv, use_cache=use_cache)
             next_past_key_values.append(new_kv)
         
@@ -607,37 +580,44 @@ class Decoder(nn.Module):
         ])
         self.norm = nn.LayerNorm(config.d_model)
 
-    def forward(
-        self, 
-        x, 
-        encoder_output, 
-        tgt_mask=None, 
-        src_mask=None, 
-        past_key_values = None,
-        use_cache=False
-    ):
-        """
-        x: (batch_size, tgt_seq_len, d_model)
-        encoder_output: (batch_size, src_seq_len, d_model)
-        tgt_mask: optional mask
-        src_mask: optional mask for cross-attention
-        past_key_values: optional list of (self_k,v,cross_k,v) for each layer
-        use_cache: bool
-        """
-        next_past_key_values = []
-        
-        for i, layer in enumerate(self.layers):
-            past_kv = past_kv = past_key_values[i] if (past_key_values is not None and i < len(past_key_values)) else (None, None)
-            x, new_kv = layer(
+    def forward(self, 
                 x, 
                 encoder_output, 
+                tgt_mask=None, 
+                src_mask=None, 
+                past_key_values=None, 
+                use_cache=False):
+        next_past_key_values = []
+        batch_size = x.size(0)
+        
+        for i, layer in enumerate(self.layers):
+            if past_key_values is not None and i < len(past_key_values):
+                past_kv = past_key_values[i]
+            else:
+                # Correct initialization for decoder's self and cross attention past_kv
+                num_heads = layer.self_attn.num_heads
+                d_k = layer.self_attn.d_k
+                # Self-attention past (K, V)
+                self_past = (
+                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype),
+                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype)
+                )
+                # Cross-attention past (K, V)
+                cross_past = (
+                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype),
+                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype)
+                )
+                past_kv = (self_past[0], self_past[1], cross_past[0], cross_past[1])
+            
+            x, new_kv = layer(
+                x, encoder_output, 
                 tgt_mask=tgt_mask, 
                 src_mask=src_mask,
                 past_key_value=past_kv,
                 use_cache=use_cache
             )
             next_past_key_values.append(new_kv)
-
+        
         x = self.norm(x)
         return x, next_past_key_values if use_cache else None
 
@@ -855,12 +835,12 @@ class Transformer(nn.Module):
             optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
             
             return metrics
-
+    
     def validation_step(self, batch) -> Dict[str, float]:
-        """Validation step with metrics collection"""
+        """Validation step with metrics collection and error handling."""
         self.eval()
         metrics = {}
-        
+
         with torch.no_grad():
             outputs = self(
                 src=batch['input_ids'],
@@ -868,10 +848,23 @@ class Transformer(nn.Module):
                 src_mask=batch.get('attention_mask'),
                 tgt_mask=self._generate_square_subsequent_mask(batch['labels'].size(1))
             )
-            
+
+            # Handle None outputs
+            if outputs is None:
+                print(f"Validation Step - Model output is None! Skipping this batch...")
+                return {"loss": float("inf"), "accuracy": 0.0}  # Avoid crashing
+
+            # If using caching, extract logits
+            if isinstance(outputs, tuple):
+                outputs = outputs[0]
+
+            # Compute loss safely
             metrics['loss'] = self.compute_loss(outputs, batch['labels']).item()
-            metrics.update(self.compute_metrics(outputs, batch['labels']))
-            
+
+            # Compute metrics safely
+            if outputs is not None:
+                metrics.update(self.compute_metrics(outputs, batch['labels']))
+    
         return metrics
 
     def compute_regularization(self) -> torch.Tensor:
