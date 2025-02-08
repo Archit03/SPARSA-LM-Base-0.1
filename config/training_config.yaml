@@ -1,27 +1,27 @@
 training:
   device: "cuda"         # Use "cuda" for GPU or "cpu" for CPU
-  epochs: 5              # Number of training epochs
-  batch_size: 4          # Minibatch size
-  learning_rate: 0.000005 # Initial learning rate
+  epochs: 3              # Fewer epochs for quick testing
+  batch_size: 8          # Balanced batch size for small-scale testing
+  learning_rate: 0.00002 # Slightly higher learning rate for faster convergence
   weight_decay: 0.01     # Weight decay for AdamW optimizer
   max_grad_norm: 1.0     # Gradient clipping threshold
   seed: 42               # Random seed for reproducibility
   resume_from_checkpoint: null
   checkpoint_dir: "checkpoints"
   checkpoint_save_frequency: 1
-  scheduler_type: "linear"        # "linear" scheduling
-  warmup_ratio: 0.1               # Ratio of warmup steps for LR scheduler
-  gradient_accumulation_steps: 8  # Reduced from 16 for stability
-  log_every_n_steps: 10
+  scheduler_type: "linear"
+  warmup_ratio: 0.05     # Reduced warmup steps
+  gradient_accumulation_steps: 2  # Faster updates with smaller model
+  log_every_n_steps: 5
   eval_every_n_epochs: 1
-  early_stopping_patience: 3
+  early_stopping_patience: 2
   use_mixed_precision: false
-  amp_scaler_init_scale: 32768    # Reduced from 65536 for fewer overflows
+  amp_scaler_init_scale: 8192  # Further reduced for stability in small models
 
 dataset:
   train_dataset: "local_data"
-  max_seq_len: 256
-  num_workers: 1
+  max_seq_len: 64   # Reduced sequence length for efficiency
+  num_workers: 2    # Increased for faster data loading
   shuffle: true
   preprocessing:
     lowercase: true
@@ -33,33 +33,32 @@ dataset:
 tokenizer:
   path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer"
   add_special_tokens: true
+  vocab_size: 512  # Reduced vocabulary size for testing
 
 model:
-  # 2 layers encoder, 2 layers decoder
-  num_layers: 2
-  num_heads: 2
-  hidden_dim: 128
-  ff_dim: 512
+  # 1 layer encoder, 1 layer decoder
+  num_layers: 1
+  num_heads: 1
+  hidden_dim: 64    # Small hidden dimension for efficiency
+  ff_dim: 128       # Reduced feedforward size
   dropout: 0.1
-  vocab_size: 4000
-  max_seq_len: 256
-  use_checkpointing: true
-  checkpointing_params:
-    use_reentrant: false
-  activation: "gelu"
+  vocab_size: 512   # Matches tokenizer vocab size
+  max_seq_len: 64   # Matches reduced sequence length
+  use_checkpointing: false  # Disabled for quick testing
+  activation: "relu"
   tie_embeddings: true
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: true
-  wandb_project: "LuminaLM_Base_0.1"
+  use_wandb: false   # Disabled WandB for minimal overhead
+  wandb_project: "LuminaLM_Test"
   wandb_entity: null
-  log_gradients: true
-  log_model_weights: true
+  log_gradients: false
+  log_model_weights: false
   log_train_steps: true
-  log_frequency: 100
-  gradient_logging_frequency: 1000
-  
+  log_frequency: 50
+  gradient_logging_frequency: 500
+
 memory_monitor:
   enabled: true
   log_frequency: 10

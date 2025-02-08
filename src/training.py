@@ -532,6 +532,16 @@ class Trainer:
                     decoder_input_ids = batch["decoder_input_ids"].to(self.device)
                     decoder_attention_mask = batch["decoder_attention_mask"].to(self.device)
                     labels = batch["labels"].to(self.device)
+
+                    """
+                    self.logger.info(f"\nStep {step} - Input Shapes:")
+                    self.logger.info(f"encoder_input_ids: {encoder_input_ids.shape}")
+                    self.logger.info(f"encoder_attention_mask: {encoder_attention_mask.shape}")
+                    self.logger.info(f"decoder_input_ids: {decoder_input_ids.shape}")
+                    self.logger.info(f"decoder_attention_mask: {decoder_attention_mask.shape}")
+                    self.logger.info(f"labels: {labels.shape}")
+                    """
+
                 else:
                     self.logger.info(f"\nStep {step} - Tensor states")
                     debug_tensor_values(encoder_input_ids, "encoder_input_ids", self.logger)
@@ -541,10 +551,10 @@ class Trainer:
                     if decoder_input_ids is not None:
                         decoder_attention_mask = Transformer._generate_square_subsequent_mask(decoder_input_ids.size(1)).to(self.device)
                         outputs = self.model(
-                            input_ids=encoder_input_ids,
-                            attention_mask=encoder_attention_mask,
-                            decoder_input_ids=decoder_input_ids,
-                            decoder_attention_mask=decoder_attention_mask,
+                                src=encoder_input_ids,
+                                tgt=decoder_input_ids,
+                                attention_mask=encoder_attention_mask,
+                                tgt_mask=decoder_attention_mask
                         )
                     else:
                         outputs = self.model(
@@ -557,10 +567,14 @@ class Trainer:
                             f"Outputs last dimension {outputs.size(-1)} does not match vocab_size {self.model.config.vocab_size}. Slicing outputs."
                         )
                         outputs = outputs[..., :self.model.config.vocab_size]   
+                    self.logger.info(f"Model outputs shape: {outputs.shape}")
                     
                     outputs = torch.clamp(outputs, min=-1e9, max=1e9) 
 
                     labels = torch.where(labels != -100, torch.clamp(labels, 0, self.model.config.vocab_size - 1), labels) #Clamp labels, so the training is more stable. 
+
+                    self.logger.info(f"Outputs after processing: {outputs.shape}")
+                    self.logger.info(f"Labels after processing: {labels.shape}")
 
                     flat_outputs, flat_labels = debug_loss_inputs(
                         outputs,
@@ -648,31 +662,59 @@ class Trainer:
         total_loss = 0.0
         progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
 
-        for batch in progress_bar:
+        for step, batch in enumerate(progress_bar):
             try:
-                inputs = batch.get("encoder_input_ids", None)
-                attention_mask = batch.get("encoder_attention_mask", None)
-                labels = batch.get("labels", None)  # FIX: Assign labels BEFORE checking invalid values
+                encoder_input_ids = batch.get("encoder_input_ids", None)
+                encoder_attention_mask = batch.get("encoder_attention_mask", None)
+                decoder_input_ids = batch.get("decoder_input_ids", None)
+                decoder_attention_mask = batch.get("decoder_attention_mask", None)
+                labels = batch.get("labels", None)  
 
-                if inputs is None or attention_mask is None or labels is None:
-                    self.logger.error("Missing keys in batch. Skipping this batch...")
+                if (
+                    encoder_input_ids is None 
+                    or encoder_attention_mask is None 
+                    or decoder_input_ids is None
+                    or decoder_attention_mask is None
+                    or labels is None
+                ):
+                    self.logger.error(f"Step {step} - Missing keys in batch. Skipping this batch...")
                     continue
 
-                inputs = inputs.to(self.device)
-                attention_mask = attention_mask.to(self.device)
+                # Move tensors to device
+                encoder_input_ids = encoder_input_ids.to(self.device)
+                encoder_attention_mask = encoder_attention_mask.to(self.device)
+                decoder_input_ids = decoder_input_ids.to(self.device)
+                decoder_attention_mask = decoder_attention_mask.to(self.device)
                 labels = labels.to(self.device)
+                """
+                # Log input shapes
+                self.logger.info(f"\nStep {step} - Validation Input Shapes:")
+                self.logger.info(f"encoder_input_ids: {encoder_input_ids.shape}")
+                self.logger.info(f"encoder_attention_mask: {encoder_attention_mask.shape}")
+                self.logger.info(f"decoder_input_ids: {decoder_input_ids.shape}")
+                self.logger.info(f"decoder_attention_mask: {decoder_attention_mask.shape}")
+                self.logger.info(f"labels: {labels.shape}")
+                """
 
                 labels = torch.where(labels != -100, torch.clamp(labels, 0, self.model.config.vocab_size - 1), labels)
 
-                #FIX: Assign `labels` before using in `invalid_labels`
+                # Check for invalid label values
                 invalid_labels = (labels < 0) | (labels >= self.model.config.vocab_size)
                 if invalid_labels.any():
-                    self.logger.error(f"Invalid label values detected! {labels[invalid_labels].tolist()}")
+                    self.logger.error(f"Step {step} - Invalid label values detected: {labels[invalid_labels].tolist()}")
                     raise ValueError("Invalid labels found in validation step!")
-                
+
                 # Forward pass
-                outputs = self.model(inputs, attention_mask=attention_mask)
-                 
+                outputs = self.model(
+                        src=encoder_input_ids,
+                        tgt=decoder_input_ids,
+                        attention_mask=encoder_attention_mask,
+                        tgt_mask=decoder_attention_mask
+                )
+
+                # Log model output shape
+                self.logger.info(f"Step {step} - Model Output Shape: {outputs.shape}")
+
                 # Flatten for cross-entropy loss
                 flat_outputs = outputs.view(-1, outputs.size(-1))
                 flat_labels = labels.view(-1)
@@ -682,23 +724,28 @@ class Trainer:
                 # Compute loss
                 loss = self.criterion(flat_outputs, flat_labels)
                 total_loss += loss.item()
+
+                # Log loss value
+                self.logger.info(f"Step {step} - Validation Loss: {loss.item():.4f}")
+
             except Exception as e:
-                self.logger.error(f"Validation: {e}")
-        
+                self.logger.error(f"Validation Error at Step {step}: {e}")
+
         avg_loss = total_loss / len(self.val_loader) if len(self.val_loader) > 0 else float('inf')
         val_perplexity = self._calculate_perplexity(avg_loss)
 
         self.logger.info(
             f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, "
             f"Perplexity: {val_perplexity:.2f}"
-            )
+        )
+
         if self.use_wandb:
             wandb.log({
                 "model": "LuminaLM",
                 "val_loss": avg_loss,
                 "val_perplexity": val_perplexity
             })
-        
+
         return avg_loss, val_perplexity
 
     def train(self) -> str:

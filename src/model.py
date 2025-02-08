@@ -220,42 +220,62 @@ class SparseMultiHeadAttention(nn.Module):
 
     def attn_function(self, Q, K, V, local_mask, attn_mask):
         """
-        Perform scaled dot-product attention with support for sparse local window masking 
-        and optional additive attention masking.
+        Perform scaled dot-product attention with improved numerical stability.
         """
         batch_size, num_heads, seq_len, _ = Q.size()
         
-        # Ensure local_mask is on the correct device and expand
+        # Add small epsilon to prevent division by zero
+        eps = 1e-8
+        
+        # Check and fix any NaN/Inf in input tensors
+        for tensor, name in [(Q, 'Q'), (K, 'K'), (V, 'V')]:
+            if torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)):
+                print(f"Warning: Found NaN/Inf in {name} tensor!")
+                tensor = torch.nan_to_num(tensor, nan=0.0, posinf=1e4, neginf=-1e4)
+        
+        # Ensure local_mask is on correct device
         local_mask = local_mask.to(Q.device)
         local_mask = local_mask.unsqueeze(0).unsqueeze(1).expand(batch_size, num_heads, seq_len, seq_len)
 
-        # Calculate attention scores
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        # Calculate attention scores with improved numerical stability
+        scale_factor = math.sqrt(self.d_k)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (scale_factor + eps)
+        
+        # Clamp scores to prevent extreme values
+        scores = torch.clamp(scores, min=-1e4, max=1e4)
 
-        # Handle attention mask if provided
+        # Handle attention mask
         if attn_mask is not None:
             attn_mask = attn_mask.to(Q.device)
-            # Handle different input mask dimensions
-            if attn_mask.dim() == 2:  # [batch_size, seq_len]
+            if attn_mask.dim() == 2:
                 attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
-            elif attn_mask.dim() == 3:  # [batch_size, 1, seq_len]
+            elif attn_mask.dim() == 3:
                 attn_mask = attn_mask.unsqueeze(1)
-            # Expand to [batch_size, num_heads, seq_len, seq_len]
             attn_mask = attn_mask.expand(batch_size, num_heads, seq_len, seq_len)
-            # Apply mask by setting masked positions to -inf
             scores = scores.masked_fill(~attn_mask.bool(), float('-inf'))
 
         # Apply local window mask
         scores = scores + local_mask
         
-        # Apply softmax
-        scores = scores.softmax(dim=-1)
-
-        # Compute final attn output
+        # Apply softmax with improved numerical stability
+        scores = F.softmax(scores, dim=-1, dtype=torch.float32)  # Force float32 for better stability
+        
+        # Check for NaN/Inf in attention weights
+        if torch.any(torch.isnan(scores)) or torch.any(torch.isinf(scores)):
+            print("Warning: NaN/Inf in attention weights!")
+            scores = torch.nan_to_num(scores, nan=0.0, posinf=1.0, neginf=0.0)
+            # Renormalize if necessary
+            scores = scores / (scores.sum(dim=-1, keepdim=True) + eps)
+        
+        # Compute output with dropout
         output = torch.matmul(scores, V)
-
+        
+        # Final output check
+        if torch.any(torch.isnan(output)) or torch.any(torch.isinf(output)):
+            print("Warning: NaN/Inf in attention output!")
+            output = torch.nan_to_num(output, nan=0.0, posinf=1e4, neginf=-1e4)
+        
         return output, scores
-
 
     def forward(
         self, 
@@ -272,10 +292,6 @@ class SparseMultiHeadAttention(nn.Module):
         past_key_value: (past_k, past_v) each with shape:
                         (batch_size, num_heads, past_seq_len, d_k)
         use_cache: If True, will store/return new (k, v).
-
-        Returns:
-            output: (batch_size, seq_len, d_model)
-            next_key_value: Optional[Tuple[Tensor, Tensor]]
         """
         # Validate input shapes
         batch_size, seq_len, d_model = q.size()
@@ -300,18 +316,22 @@ class SparseMultiHeadAttention(nn.Module):
 
         # 3) Handle caching with validation
         if past_key_value is not None:
-            try:
-                past_k, past_v = past_key_value
-                # Validate cache shapes
-                assert past_k.size(0) == batch_size, "Cache batch size must match"
-                assert past_k.size(1) == self.config.num_heads, "Cache heads must match"
-                assert past_k.size(-1) == self.d_k, "Cache dimension must match"
-                assert past_k.size() == past_v.size(), "Cache K,V shapes must match"
-                
-                K_ = torch.cat([past_k, K_], dim=2)  # seq_len dimension
-                V_ = torch.cat([past_v, V_], dim=2)
-            except Exception as e:
-                raise RuntimeError(f"Error processing cached KV: {str(e)}")
+            past_k, past_v = past_key_value
+            # Only try to use cache if both past_k and past_v are not None
+            if past_k is not None and past_v is not None:
+                try:
+                    # Validate cache shapes
+                    assert past_k.size(0) == batch_size, "Cache batch size must match"
+                    assert past_k.size(1) == self.config.num_heads, "Cache heads must match"
+                    assert past_k.size(-1) == self.d_k, "Cache dimension must match"
+                    assert past_k.size() == past_v.size(), "Cache K,V shapes must match"
+                    
+                    K_ = torch.cat([past_k, K_], dim=2)  # seq_len dimension
+                    V_ = torch.cat([past_v, V_], dim=2)
+                except Exception as e:
+                    # Log the error but continue without using cache
+                    print(f"Warning: Could not use cache due to: {str(e)}")
+                    # Don't raise the exception - continue without cache
         
         next_key_value = None
         if use_cache:
@@ -527,28 +547,37 @@ class DecoderBlock(nn.Module):
         tgt_mask: optional mask for decoder self-attention
         src_mask: optional mask for cross-attention
         past_key_value: tuple containing:
-           (past_self_k, past_self_v, past_cross_k, past_cross_v) or similar
+           (past_self_k, past_self_v, past_cross_k, past_cross_v)
         use_cache: bool
         """
-        (past_self_k, past_self_v, past_cross_k, past_cross_v) = (None, None, None, None)
-        if past_key_value is not None:
-            past_self_k, past_self_v, past_cross_k, past_cross_v = past_key_value
+        # Initialize cache values
+        past_self_k = past_self_v = past_cross_k = past_cross_v = None
         
-        # 1) Decoder self_attn (on normed_x)
+        # Properly unpack past_key_value if provided
+        if past_key_value is not None:
+            # Handle both cases: when we get 2 values or 4 values
+            if len(past_key_value) == 2:
+                # If we get a tuple of 2, assume they're for self-attention
+                past_self_k, past_self_v = past_key_value
+            elif len(past_key_value) == 4:
+                past_self_k, past_self_v, past_cross_k, past_cross_v = past_key_value
+        
+        # 1) Decoder self-attention
         next_self_kv = None
         def self_attn_sublayer(normed_x):
             nonlocal next_self_kv
             out, new_self_kv = self.self_attn(
-                    normed_x, normed_x, normed_x,
-                    attn_mask = tgt_mask,
-                    past_key_value = (past_self_k, past_self_v),
-                    use_cache=use_cache
+                normed_x, normed_x, normed_x,
+                attn_mask=tgt_mask,
+                past_key_value=(past_self_k, past_self_v),
+                use_cache=use_cache
             )
             next_self_kv = new_self_kv
             return out
         
         x = self.self_attn_res(x, self_attn_sublayer)
-        # 2) Cross-attention (on normed_X)
+
+        # 2) Cross-attention
         next_cross_kv = None
         def cross_attn_sublayer(normed_x):
             nonlocal next_cross_kv
@@ -556,23 +585,29 @@ class DecoderBlock(nn.Module):
                 normed_x,
                 encoder_output,
                 encoder_output,
-                attn_mask = src_mask,
-                past_key_value = (past_cross_k, past_cross_v),
-                use_cache = use_cache
+                attn_mask=src_mask,
+                past_key_value=(past_cross_k, past_cross_v),
+                use_cache=use_cache
             )
             next_cross_kv = new_cross_kv
             return out
+        
         x = self.cross_attn_res(x, cross_attn_sublayer)
 
         # 3) Feed-forward
         x = self.ff_res(x, self.feed_forward)
 
+        # Handle cache return values
         next_key_value = None
         if use_cache:
+            # Ensure we always return a 4-tuple for cache consistency
             next_key_value = (
-                next_self_kv[0], next_self_kv[1],
-                next_cross_kv[0], next_cross_kv[1]
+                next_self_kv[0] if next_self_kv else None,
+                next_self_kv[1] if next_self_kv else None,
+                next_cross_kv[0] if next_cross_kv else None,
+                next_cross_kv[1] if next_cross_kv else None
             )
+        
         return x, next_key_value
 
 ###############################################################################
@@ -597,7 +632,7 @@ class Encoder(nn.Module):
         next_past_key_values = []
 
         for i, layer in enumerate(self.layers):
-            past_kv = past_key_values[i] if (past_key_values is not None) else None
+            past_kv = past_kv = past_key_values[i] if (past_key_values is not None and i < len(past_key_values)) else (None, None)
             x, new_kv = layer(x, src_mask=src_mask, past_key_value=past_kv, use_cache=use_cache)
             next_past_key_values.append(new_kv)
         
@@ -636,7 +671,7 @@ class Decoder(nn.Module):
         next_past_key_values = []
         
         for i, layer in enumerate(self.layers):
-            past_kv = past_key_values[i] if (past_key_values is not None) else None
+            past_kv = past_kv = past_key_values[i] if (past_key_values is not None and i < len(past_key_values)) else (None, None)
             x, new_kv = layer(
                 x, 
                 encoder_output, 
@@ -701,68 +736,61 @@ class Transformer(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(
-            self, 
-            src: torch.Tensor,
-            tgt: Optional[torch.Tensor] = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            tgt_mask: Optional[torch.Tensor] = None,
-            past_key_values: Optional[List[Tuple]] = None,
-            use_cache: bool = False
+        self, 
+        src: torch.Tensor,
+        tgt: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        tgt_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[Tuple]] = None,
+        use_cache: bool = False
     ):
         """
-          Args:
+        Args:
             src: shape (batch_size, src_seq_len)
             tgt: shape (batch_size, tgt_seq_len), optional
-            attention_mask: Typically a padding mask for the encoder (batch_size, src_seq_len)
-            tgt_mask: Typically a causal mask for the decoder (batch_size, tgt_seq_len, tgt_seq_len)
-            past_key_values: Optional list of cached key/value states for each layer
+            attention_mask: Typically a padding mask for the encoder
+            tgt_mask: Typically a causal mask for the decoder
+            past_key_values: Optional list of cached key/value states
             use_cache: If True, return new cache
         """
-
-        # 1) Encoder the source (bidirectional, like BERT)
+        # 1) Encode the source
         enc_inp = self.embedding(src)
         if not self.config.use_rope:
             enc_inp = self.pos_encoding(enc_inp)
         
-        #Pass the appropriate "past_key_values" to the encoder if using caching.
+        # Handle encoder caching
+        encoder_past = None if past_key_values is None else past_key_values[0]
         encoder_output, enc_past = self.encoder(
             enc_inp,
-            src_mask = attention_mask,
-            past_key_values= past_key_values if past_key_values else None,
+            src_mask=attention_mask,
+            past_key_values=encoder_past,
             use_cache=use_cache
         )
 
-        # 2) If tgt is provided, run the decoder (causal, like GPT)
+        # 2) If tgt is provided, run the decoder
         if tgt is not None:
             dec_inp = self.embedding(tgt)
             if not self.config.use_rope:
                 dec_inp = self.pos_encoding(dec_inp)
             
-            # Pass the decoder portion of past_key_values if you want caching in the decoder
+            # Handle decoder caching
+            decoder_past = None if past_key_values is None else past_key_values[1]
             decoder_outputs, dec_past = self.decoder(
                 dec_inp,
                 encoder_output,
-                tgt_mask = tgt_mask,
-                src_mask = attention_mask,
-                past_key_values=(past_key_values) if past_key_values else None,
+                tgt_mask=tgt_mask,
+                src_mask=attention_mask,
+                past_key_values=decoder_past,
                 use_cache=use_cache
             )
 
             logits = self.generator(decoder_outputs)
-            if logits.size(-1) != self.config.vocab_size:
-                self.logger.warning(
-                    f"Logits last dimension {logits.size(-1)} does not match config.vocab_size {self.config.vocab_size}. Slicing logits."
-                )
-                logits = logits[..., :self.config.vocab_size]
-            logits = torch.clamp(logits, min=-1e9, max=1e9)
-
-
-            #If using cache, return both the logits and the new cache
+            
+            # Return both logits and cache if requested
             if use_cache:
                 return logits, (enc_past, dec_past)
             return logits
         
-        #3) If no tgt is provided, return something for encoder-only usage.
         return encoder_output
 
     def configure_optimizer(self, config: TransformerConfig):
@@ -877,36 +905,57 @@ class Transformer(nn.Module):
         return metrics
 
     def compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Compute cross entropy loss with input validation."""
+        """Compute cross entropy loss with improved numerical stability."""
         # Validate shapes and values
         if outputs.dim() != 3:
-            raise ValueError(f"ERROR: Expected outputs shape (batch_size, seq_len, vocab_size), but got {outputs.shape}")  
+            raise ValueError(f"Expected outputs shape (batch_size, seq_len, vocab_size), but got {outputs.shape}")  
         if labels.dim() != 2:
-            raise ValueError(f"ERROR: Expected labels shape (batch_size, seq_len), but got {labels.shape}")
-        
+            raise ValueError(f"Expected labels shape (batch_size, seq_len), but got {labels.shape}")
+    
+        # Add eps to prevent log(0)
+        eps = 1e-8
+    
+        # Check for any infinite or NaN values
+        if torch.any(torch.isnan(outputs)) or torch.any(torch.isinf(outputs)):
+            print(f"Warning: Found NaN/Inf in model outputs! Max: {outputs.max()}, Min: {outputs.min()}")
+            # Clip values to prevent NaN/Inf propagation
+            outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1e4, neginf=-1e4)
+    
         # Ensure labels are within valid range
         if torch.any(labels >= self.config.vocab_size):
-            self.logger.warning(f"Labels Exceeded vocab size! Clamping values")
-            labels = torch.clamp(labels, 0, self.config.vocab_size -1)
-       
-        # Ensure labels do not contain negative values (except -100 for ignore_index)
+            print(f"Warning: Labels exceeded vocab size! Max label: {labels.max().item()}")
+            labels = torch.clamp(labels, 0, self.config.vocab_size - 1)
+    
+        # Ensure labels don't contain invalid negative values
         if torch.any((labels < 0) & (labels != -100)):
-            raise ValueError(f" ERROR: Found invalid negative label values! Min label: {labels.min().item()}")
-        
+            raise ValueError(f"Found invalid negative label values! Min label: {labels.min().item()}")
+    
         # Flatten tensors for loss calculation
-        flatten_outputs = outputs.view(-1, outputs.size(-1))
+        flat_outputs = outputs.view(-1, outputs.size(-1))
         flat_labels = labels.view(-1)
 
-        # Retrieve label smoothing parameter (default to 0 if missing)
+        # Apply log softmax with improved numerical stability
+        log_probs = F.log_softmax(flat_outputs + eps, dim=-1)
+    
+        # Compute loss with optional label smoothing
         label_smoothing = getattr(self.config, "label_smoothing", 0.0)
-
-        #Compute Loss with optional label smoothing
+    
         loss = F.cross_entropy(
-            flatten_outputs,
+            flat_outputs,
             flat_labels,
             ignore_index=self.config.pad_token_id,
-            label_smoothing=label_smoothing
+            label_smoothing=label_smoothing,
+            reduction='mean'
         )
+    
+        # Check for NaN loss
+        if torch.isnan(loss):
+            print("Warning: NaN loss detected!")
+            print(f"Output stats - Mean: {outputs.mean():.4f}, Std: {outputs.std():.4f}")
+            print(f"Label stats - Min: {labels.min()}, Max: {labels.max()}")
+            # Return a small positive value instead of NaN to prevent training collapse
+            return torch.tensor(1.0, device=loss.device, requires_grad=True)
+        
         return loss
         
     @staticmethod

@@ -3,16 +3,9 @@ datasets:
 - name: local
   type: local
   config:
-    path: "C:/Users/ASUS/Desktop/PreProcessed/processed/cleaned"
+    path: "C:/Users/ASUS/Desktop/PreProcessed/processed/cleaned/test"
     patterns: 
       - "*.txt"
       - "*.csv"
     csv_text_column: "text" 
-
-- name: hari560
-  type: huggingface
-  config:
-    dataset_name: "hari560/medical-data"
-    cache_dir: "cache/hari560" 
-    keep_in_memory: false
 
