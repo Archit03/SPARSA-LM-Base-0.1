@@ -5,6 +5,9 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import transformers
 from typing import Dict, Optional, List, Tuple, Union
+from torch.optim.lr_scheduler import LambdaLR
+import numpy as np
+
 
 """This code belongs to EllanorAI and is licensed under the EllanorAI Proprietary License."""
 
@@ -190,12 +193,6 @@ class PositionalEncoding(nn.Module):
 ###############################################################################
 # Sparse Multi-Head Attention with Optional KV Caching
 ###############################################################################
-import math
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-
 class SparseMultiHeadAttention(nn.Module):
     """
     Multi-Head Attention with Sparse Local Windowing and Optional Global Tokens.
@@ -634,6 +631,7 @@ class Transformer(nn.Module):
     ):
         super().__init__()
         self.config = config
+        self.device = config.device
         
         # Embeddings
         self.embedding = nn.Embedding(config.vocab_size, config.d_model)
@@ -658,7 +656,7 @@ class Transformer(nn.Module):
         self._reset_parameters()
         
         # Training features
-        self.scaler = torch.amp.GradScaler(
+        self.scaler = torch.amp.GradScaler(device="cuda" if torch.cuda.is_available() else "cpu",
             enabled=config.use_mixed_precision
         )
         self.metrics = {
@@ -686,7 +684,7 @@ class Transformer(nn.Module):
             else:
                 # Initialize biases to 0
                 nn.init.zeros_(p)
-
+                
     def forward(
         self, 
         src: torch.Tensor,
@@ -699,14 +697,23 @@ class Transformer(nn.Module):
         """
         Enhanced forward pass with numerical stability checks.
         """
+        # ✅ Ensure `src` and `tgt` are Long Tensors before embedding
+        if src.dtype != torch.long:
+            print(f"🚨 WARNING: Model received `src` with dtype {src.dtype}, forcing conversion to long.")
+            src = src.to(torch.long)
+
+        if tgt is not None and tgt.dtype != torch.long:
+            print(f"🚨 WARNING: Model received `tgt` with dtype {tgt.dtype}, forcing conversion to long.")
+            tgt = tgt.to(torch.long)
+
         # 1. Input validation
         if not src.isfinite().all():
             src = torch.nan_to_num(src)
             print("Warning: Non-finite values in source tokens")
         
         # 2. Embedding with gradient scaling
-        with torch.cuda.amp.autocast(enabled=self.config.use_mixed_precision):
-            enc_inp = self.embedding(src)
+        with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", enabled=self.config.use_mixed_precision):
+            enc_inp = self.embedding(src)  # ✅ Now guaranteed to be Long Tensor
             if not self.config.use_rope:
                 enc_inp = self.pos_encoding(enc_inp)
             
@@ -737,7 +744,7 @@ class Transformer(nn.Module):
             
             # 6. Decoder and output generation (if needed)
             if tgt is not None:
-                dec_inp = self.embedding(tgt)
+                dec_inp = self.embedding(tgt)  # ✅ Now guaranteed to be Long Tensor
                 if not self.config.use_rope:
                     dec_inp = self.pos_encoding(dec_inp)
                 
@@ -764,6 +771,7 @@ class Transformer(nn.Module):
                 return logits
             
             return encoder_output
+
 
     def configure_optimizer(self, config: TransformerConfig):
         """Configure optimizer with weight decay"""
@@ -799,7 +807,7 @@ class Transformer(nn.Module):
             self.train()
             metrics = {}
             
-            with torch.amp.autocast(enabled=self.config.use_mixed_precision):
+            with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", enabled=self.config.use_mixed_precision):
                 # Forward pass
                 outputs = self(
                     src=batch['input_ids'],
@@ -936,26 +944,34 @@ class Transformer(nn.Module):
         loss = loss.sum() / num_tokens
         
         return loss
-
-        
+    
     @staticmethod
     def get_scheduler(optimizer, config: TransformerConfig, num_training_steps: int):
-        """Enhanced learning rate scheduler with warmup"""
+        """Enhanced learning rate scheduler with warmup and min_lr support"""
         num_warmup_steps = int(num_training_steps * config.warmup_ratio)
-        
-        if config.scheduler_type == "cosine_warmup":
-            return transformers.get_cosine_schedule_with_warmup(
+
+        if config.scheduler_type == "cosine_with_min_lr":
+            min_lr = config.lr_scheduler_kwargs.get("min_lr", 1e-6)  # Properly fetch min_lr
+
+            return LambdaLR(
                 optimizer,
-                num_warmup_steps=num_warmup_steps,
-                num_training_steps=num_training_steps
+                lambda step: (
+                    step / max(1, num_warmup_steps)  # Warmup phase
+                    if step < num_warmup_steps else
+                    min_lr + (config.learning_rate - min_lr) * 
+                    (1 + np.cos(np.pi * (step - num_warmup_steps) / (num_training_steps - num_warmup_steps))) / 2
+                )
             )
+
         elif config.scheduler_type == "linear_warmup":
             return transformers.get_linear_schedule_with_warmup(
                 optimizer,
                 num_warmup_steps=num_warmup_steps,
                 num_training_steps=num_training_steps
             )
-        
+
+        else:
+            raise ValueError(f"Unknown scheduler type: {config.scheduler_type}")
 
     @staticmethod
     def _generate_square_subsequent_mask(sz: int) -> torch.Tensor:

@@ -1,31 +1,37 @@
 training:
   device: "cuda"
   epochs: 5              
-  batch_size: 4        
-  learning_rate: 0.0002  
+  batch_size: 2  # 🔹 Small batch size for 4GB VRAM stability
+  learning_rate: 2e-4  # 🔹 Kept higher for faster convergence
   weight_decay: 0.01     
   max_grad_norm: 1.0     
-  gradient_accumulation_steps: 16  
+  gradient_accumulation_steps: 16  # 🔹 Ensures training stability
   seed: 42               
   resume_from_checkpoint: null
   checkpoint_dir: "checkpoints"
   checkpoint_save_frequency: 1
-  scheduler_type: "cosine"
+  scheduler_type: "cosine_with_min_lr"  # 🔹 Stable LR decay
   lr_scheduler_kwargs:
-    min_lr: 1e-6 
+    min_lr: 1e-6  # ✅ Keep stable min_lr
   warmup_ratio: 0.1               
-  log_every_n_steps: 10
+  log_every_n_steps: 100  # 🔹 Reduce logging frequency
   eval_every_n_epochs: 1
   early_stopping_patience: 3
   use_mixed_precision: true        
-  amp_scaler_init_scale: 32768     
-  use_gradient_checkpointing: true 
+  amp_scaler_init_scale: 8192  # 🔹 Reduced to prevent NaN loss issues
+  use_gradient_checkpointing: false  # 🔹 Disabled for small models
+  enable_gradient_accumulation: true  
+  max_grad_value: 100.0  
+  use_noise_injection: true  
 
 dataset:
   train_dataset: "local_data"
-  max_seq_len: 128       
-  num_workers: 2         
+  max_seq_len: 64  # 🔹 Small sequence length for small model
+  num_workers: 0  # 🔹 Reduce to avoid DataLoader stalls
   shuffle: true
+  pin_memory: true  # 🔹 Speed up GPU transfers
+  prefetch_factor: 2  # 🔹 Improve data pipeline efficiency
+  persistent_workers: false  # 🔹 Prevent stuck processes in DataLoader
   preprocessing:
     lowercase: true
     min_length: 5
@@ -38,32 +44,34 @@ tokenizer:
   add_special_tokens: true
 
 model:
-  hidden_dim: 144        # ✅ Reduced to fit 2M parameters
-  num_layers: 4          # ✅ Reduced from 6 to 4
-  num_heads: 6           # ✅ Reduced from 8 to 6
-  ff_dim: 768              # ✅ Reduced from 1024 to 768
-  dropout: 0.1          
-  vocab_size: 4000      
-  max_seq_len: 128      
-  use_checkpointing: true  
-  activation: "gelu"    
-  tie_embeddings: true
-  window_size: 4        
-  global_tokens: 0      
+  hidden_dim: 48  # 🔹 Reduced to stay under 100K parameters
+  num_layers: 2  # 🔹 Small Transformer model
+  num_heads: 1  # 🔹 Minimized for efficiency
+  ff_dim: 96  # 🔹 Balanced to stay under 100K
+  dropout: 0.1  
+  vocab_size: 512  # ✅ Small vocabulary for 5MB dataset
+  max_seq_len: 64  # ✅ Adjusted to match dataset
+  use_checkpointing: false  # 🔹 Not needed for small model
+  activation: "gelu"  
+  tie_embeddings: true  # ✅ Saves parameters by sharing weights
+  window_size: 2  
+  global_tokens: 0  
+  use_reentrant: false  
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: true
-  wandb_project: "LuminaLM_Base_2M"
+  use_wandb: false
+  wandb_project: "LuminaLM_Base_Small"
   wandb_entity: null
-  log_gradients: true
-  log_model_weights: true
+  log_gradients: false  # 🔹 Disable gradient logging to speed up training
+  log_model_weights: false  # 🔹 Reduce logging overhead
   log_train_steps: true
-  log_frequency: 100
-  gradient_logging_frequency: 1000
+  log_frequency: 500  # 🔹 Reduce frequent logging to avoid slowdowns
+  gradient_logging_frequency: 2000
 
 memory_monitor:
   enabled: true
   log_frequency: 10
   monitor_gpu: true
-  monitor_cpu: true  
+  monitor_cpu: true
+  empty_cache: true  # 🔹 Enable explicit CUDA memory clearance after each batch

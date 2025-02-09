@@ -242,11 +242,11 @@ class TextDataset(Dataset):
         decoder_attention_mask = (decoder_input_ids != self.pad_id).long()
 
         return {
-            "encoder_input_ids": input_ids,
+            "encoder_input_ids": input_ids.to(torch.long),
             "encoder_attention_mask": attention_mask,
-            "decoder_input_ids": decoder_input_ids,
+            "decoder_input_ids": decoder_input_ids.to(torch.long),
             "decoder_attention_mask": decoder_attention_mask,
-            "labels": labels,
+            "labels": labels.to(torch.long),
         }
 
     @staticmethod
