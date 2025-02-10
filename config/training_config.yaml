@@ -44,7 +44,7 @@ tokenizer:
   add_special_tokens: true
 
 model:
-  hidden_dim: 48  # 🔹 Reduced to stay under 100K parameters
+  d_model: 48  # 🔹 Reduced to stay under 100K parameters
   num_layers: 2  # 🔹 Small Transformer model
   num_heads: 1  # 🔹 Minimized for efficiency
   ff_dim: 96  # 🔹 Balanced to stay under 100K

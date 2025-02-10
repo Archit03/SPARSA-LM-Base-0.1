@@ -5,7 +5,7 @@ setlocal enabledelayedexpansion
 set PYTHON_PATH=python
 set SCRIPT_PATH=src\tokenizer.py
 set LOG_DIR=C:\Users\ASUS\Desktop\SPARSA-LM-Base 0.1\logs
-set VOCAB_SIZE=512
+set VOCAB_SIZE=4000
 set MIN_FREQ=2
 set DATASET_CONFIG=C:\Users\ASUS\Desktop\SPARSA-LM-Base 0.1\config\dataset_config.yaml
 set CACHE_DIR=C:\Users\ASUS\Desktop\SPARSA-LM-Base 0.1\data\processed\cache

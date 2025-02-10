@@ -3,7 +3,7 @@ datasets:
 - name: local
   type: local
   config:
-    path: "C:/Users/ASUS/Desktop/PreProcessed/processed/cleaned/test"
+    path: "C:/Users/ASUS/Desktop/PreProcessed/processed/cleaned"
     patterns: 
       - "*.txt"
       - "*.csv"

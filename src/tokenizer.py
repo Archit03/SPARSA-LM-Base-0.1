@@ -45,6 +45,7 @@ import itertools
 import warnings
 warnings.filterwarnings('ignore')
 import os
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder 
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TF warnings
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'  # Enable tokenizer parallelism
@@ -565,6 +566,7 @@ class MedicalTokenizer:
         for token in special_tokens:
             _ = self.tokenizer.token_to_id(token)
         
+        
         # Configure padding and truncation
         self.padding_config = {
             'strategy': padding_strategy,
@@ -590,7 +592,7 @@ class MedicalTokenizer:
             'bos_token': "[BOS]",
             'eos_token': "[EOS]"
         }
-        
+                
         # Normalization configuration
         self.normalize = normalize
         if normalize:
@@ -1048,20 +1050,23 @@ class TokenizerTrainer:
         self.texts = texts
         
         # Initialize tokenizer with BPE model
-        self.tokenizer = Tokenizer(BPE(dropout=0.1, unk_token="[UNK]"))
+        self.tokenizer = Tokenizer(BPE(unk_token="[UNK]", dropout=0.1))
         
         # Set up ByteLevel pre-tokenizer and decoder
         self.tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
-        self.tokenizer.decoder = ByteLevel()
+        self.tokenizer.decoder = ByteLevelDecoder()
+
+        
         
         # Configure trainer
         self.trainer = BpeTrainer(
             vocab_size=vocab_size,
             min_frequency=min_frequency,
-            special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"],
+            special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]","[BOS]","[EOS]"],
             initial_alphabet=ByteLevel.alphabet(),
             show_progress=True
         )
+
         
         self.texts_buffer = []
         self.buffer_size = 10000
@@ -1093,7 +1098,7 @@ class TokenizerTrainer:
             
             # Set up pre-tokenizer and decoder
             self.tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
-            self.tokenizer.decoder = ByteLevel()
+            self.tokenizer.decoder = ByteLevelDecoder()
             
             # Train from files if available
             if self.files:
@@ -1109,12 +1114,12 @@ class TokenizerTrainer:
                 raise ValueError("No training data provided")
             
             # Verify configuration after training
-            model_config = self.tokenizer.get_model()
-            if not model_config.dropout == 0.1:
+            model_config = self.tokenizer.model
+            if not model_config.dropout > 0.1:
                 logging.warning("Dropout value not properly set")
             if not model_config.unk_token == "[UNK]":
                 logging.warning("UNK token not properly set")
-            if not isinstance(self.tokenizer.decoder, ByteLevel):
+            if not isinstance(self.tokenizer.decoder, ByteLevelDecoder):
                 logging.warning("ByteLevel decoder not properly set")
             
             return self.tokenizer

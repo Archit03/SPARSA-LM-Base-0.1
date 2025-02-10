@@ -1,149 +1,222 @@
 import torch
 from transformers import PreTrainedTokenizerFast
-from model import Transformer, TransformerConfig
+from typing import Optional, Dict, Any
 import yaml
 import os
+import logging
+from tqdm import tqdm
 
-# -----------------------------------------------
-# Load Configuration
-# -----------------------------------------------
-def load_config(config_path="config/inference_config.yaml"):
-    """Load the YAML configuration file."""
-    with open(config_path, "r") as f:
+def load_config(config_path: str = "config/inference_config.yaml") -> Dict[str, Any]:
+    """Load configuration from YAML file."""
+    with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-# -----------------------------------------------
-# Load Tokenizer
-# -----------------------------------------------
-def load_tokenizer(tokenizer_path):
-    """Load the tokenizer from the given path and ensure special tokens are set."""
+def load_tokenizer(tokenizer_path: str) -> PreTrainedTokenizerFast:
+    """Load and configure the tokenizer with proper cleanup settings."""
     tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
-
-    # Ensure special tokens are correctly set
+    
+    # Ensure special tokens are set
     special_tokens = {
         "pad_token": "[PAD]",
         "unk_token": "[UNK]",
         "bos_token": "[BOS]",
         "eos_token": "[EOS]",
     }
+    
     for key, value in special_tokens.items():
         if getattr(tokenizer, key) is None:
             setattr(tokenizer, key, value)
-
-    # Debugging: Verify tokenizer properties
-    print(f"✅ Tokenizer loaded from {tokenizer_path}")
-    print(f"📝 Vocab Size: {tokenizer.vocab_size}")
-    print(f"🔹 Special Tokens: PAD={tokenizer.pad_token_id}, UNK={tokenizer.unk_token_id}, BOS={tokenizer.bos_token_id}, EOS={tokenizer.eos_token_id}")
-
-    # Tokenization test
-    test_sentence = "Hello, this is a test!"
-    encoded = tokenizer.encode(test_sentence)
-    decoded = tokenizer.decode(encoded)
-    print(f"🧪 Tokenization Test: '{test_sentence}' → {encoded}")
-    print(f"📝 Decoded Output: {decoded}")
-
+    
+    # Configure tokenizer settings for better output
+    tokenizer.clean_up_tokenization_spaces = True
+    tokenizer.trim_offsets = True
+    
     return tokenizer
 
-# -----------------------------------------------
-# Load Model Configuration
-# -----------------------------------------------
-def get_model_config(config):
-    """Load model hyperparameters from the configuration file."""
-    return TransformerConfig(
-        vocab_size=config["model"]["vocab_size"],
-        d_model=config["model"]["hidden_dim"],
-        num_layers=config["model"]["num_layers"],
-        num_heads=config["model"]["num_heads"],
-        d_ff=config["model"]["ff_dim"],
-        max_seq_len=config["model"]["max_seq_len"],
-        dropout=config["model"]["dropout"],
-        activation=config["model"]["activation"],
-        use_checkpointing=config["model"]["use_checkpointing"],
-        tie_embeddings=config["model"]["tie_embeddings"],
-        window_size=config["model"]["window_size"],
-        global_tokens=config["model"]["global_tokens"],
-        use_reentrant=config["model"]["use_reentrant"],
-    )
 
-# -----------------------------------------------
-# Load Model & Checkpoint
-# -----------------------------------------------
-def load_model(config, device):
-    """Load Transformer model from the best checkpoint."""
-    model = Transformer(get_model_config(config)).to(device)
-
-    checkpoint_dir = config["training"]["checkpoint_dir"]
-    model_checkpoint = config["training"].get("model_checkpoint", "best_LuminaLM_model.pt")  # Default to best model
-    checkpoint_path = os.path.join(checkpoint_dir, model_checkpoint)
-
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"❌ Model checkpoint not found: {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    print(f"✅ Model loaded from {checkpoint_path}")
-
-    model.eval()
-    return model
-
-# -----------------------------------------------
-# Text Generation Function
-# -----------------------------------------------
-def generate_text(model, tokenizer, config, prompt, max_length=50):
-    """Generate text given an input prompt."""
+def generate_text(
+    model,
+    tokenizer,
+    prompt: str,
+    config: Dict[str, Any],
+    max_length: Optional[int] = None,
+    temperature: Optional[float] = None,
+    top_k: Optional[int] = None,
+    top_p: Optional[float] = None
+) -> str:
+    """Generate text with improved token handling and quality."""
+    # Use config defaults if parameters not specified
+    max_length = max_length or config['generation']['max_length']
+    temperature = temperature or config['generation']['temperature']
+    top_k = top_k or config['generation']['top_k']
+    top_p = top_p or config['generation']['top_p']
+    
     device = next(model.parameters()).device
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-
-    # Ensure input fits within model's max sequence length
-    if input_ids.size(1) > config["model"]["max_seq_len"]:
-        input_ids = input_ids[:, -config["model"]["max_seq_len"]:]  # Trim input
-
+    
+    # Properly format prompt with special tokens
+    if not prompt.startswith(tokenizer.bos_token):
+        prompt = f"{tokenizer.bos_token} {prompt}"
+    
+    # Encode with proper handling of special tokens
+    input_ids = tokenizer.encode(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=True,
+        padding=True,
+    ).to(device)
+    
+    # Ensure input length doesn't exceed model's max_seq_len
+    if input_ids.size(1) > config['model']['max_seq_len']:
+        input_ids = input_ids[:, -config['model']['max_seq_len']:]
+    
+    generated_ids = input_ids[0].tolist()
+    
+    # Generate tokens one at a time
+    model.eval()
     with torch.no_grad():
-        output = model(src=input_ids)
-
-    # Debugging: Inspect First Token Output
-    first_token_id = torch.argmax(output[0, 0]).item()
-    print(f"🔍 First Generated Token ID: {first_token_id} ({tokenizer.decode([first_token_id])})")
-
-    # Convert logits to token indices with improved decoding
-    generated_ids = torch.argmax(output, dim=-1).squeeze().tolist()
-    filtered_ids = [token for token in generated_ids if token not in [tokenizer.pad_token_id, tokenizer.unk_token_id]]
-
-    generated_text = tokenizer.decode(filtered_ids, skip_special_tokens=True)
+        for _ in tqdm(range(max_length), desc="Generating"):
+            # Prepare input for model
+            curr_input = torch.tensor([generated_ids[-config['model']['max_seq_len']:]]).to(device)
+            
+            # Get model predictions
+            outputs = model(curr_input)
+            
+            # Get logits for next token prediction
+            if len(outputs.shape) == 3:
+                logits = outputs[0, -1]
+            else:
+                logits = outputs[-1]
+            
+            # Apply temperature scaling
+            logits = logits / (temperature if temperature > 0 else 1.0)
+            
+            # Apply top-k filtering
+            if top_k > 0:
+                top_k = min(top_k, logits.size(-1))
+                indices_to_remove = logits < torch.topk(logits, top_k)[0][-1]
+                logits[indices_to_remove] = float('-inf')
+            
+            # Apply top-p filtering
+            if top_p > 0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[0] = 0
+                logits[sorted_indices[sorted_indices_to_remove]] = float('-inf')
+            
+            # Sample next token with adjusted probabilities
+            probs = torch.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1).item()
+            
+            # Stop if we generate EOS token
+            if next_token == tokenizer.eos_token_id:
+                break
+            
+            generated_ids.append(next_token)
+    
+    # Decode with special handling for better text quality
+    generated_text = tokenizer.decode(
+        generated_ids,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=True
+    )
+    
+    # Clean up any remaining artifacts
+    generated_text = ' '.join(generated_text.split())
     
     return generated_text
 
-# -----------------------------------------------
-# Main Function for CLI Inference
-# -----------------------------------------------
-def main():
-    """CLI loop for user input to generate text from the model."""
+def setup_model_for_inference(config: Dict[str, Any]):
+    """Setup model for inference with correct parameter mapping."""
+    from model import Transformer, TransformerConfig
+    
+    # Map config parameters to TransformerConfig parameters
+    model_config = TransformerConfig(
+        vocab_size=config['model']['vocab_size'],
+        d_model=config['model']['hidden_dim'],  # Map hidden_dim to d_model
+        num_layers=config['model']['num_layers'],
+        num_heads=config['model']['num_heads'],
+        d_ff=config['model']['ff_dim'],  # Map ff_dim to d_ff
+        max_seq_len=config['model']['max_seq_len'],
+        dropout=config['model']['dropout'],
+        activation=config['model']['activation'],
+        use_checkpointing=config['model']['use_checkpointing'],
+        tie_embeddings=config['model']['tie_embeddings'],
+        window_size=config['model']['window_size'],
+        global_tokens=config['model']['global_tokens'],
+        use_reentrant=config['model']['use_reentrant']
+    )
+    
+    model = Transformer(model_config)
+    
+    # Load checkpoint
+    checkpoint_path = config['inference']['model_path']
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Model checkpoint not found at {checkpoint_path}")
+        
     try:
-        config = load_config()
-        tokenizer = load_tokenizer(config["tokenizer"]["path"])
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = load_model(config, device)
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"✅ Model loaded from {checkpoint_path}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model checkpoint: {str(e)}")
+    
+    # Move model to appropriate device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
+    
+    return model
 
-        print("\n🔥 Welcome to LuminaLM CLI Inference! 🔥")
+def main():
+    """Main inference loop with improved parameters."""
+    try:
+        # Load configuration
+        config = load_config()
+        
+        # Adjust generation parameters for better quality
+        config['generation'] = {
+            'max_length': 100,
+            'temperature': 0.8,  # Slightly higher for more natural text
+            'top_k': 40,        # Lower for more focused sampling
+            'top_p': 0.95       # Higher for more natural language
+        }
+        
+        # Load tokenizer and model
+        tokenizer = load_tokenizer(config['tokenizer']['path'])
+        model = setup_model_for_inference(config)
+        
+        print("\n🔥 Welcome to LuminaLM Text Generation! 🔥")
         print("Type your prompt and press Enter to generate text.")
         print("Type 'exit' to quit.\n")
-
+        
         while True:
-            user_input = input("💬 Enter prompt: ")
-            if user_input.lower() == "exit":
-                print("\n👋 Exiting... Thank you for using LuminaLM!")
+            prompt = input("💬 Enter prompt: ").strip()
+            if prompt.lower() == 'exit':
+                print("\n👋 Goodbye!")
                 break
-
-            generated_output = generate_text(model, tokenizer, config, user_input, max_length=50)
-            print("\n📝 Generated Output:")
-            print(generated_output)
-            print("\n" + "="*50 + "\n")
-
+            
+            try:
+                generated_text = generate_text(
+                    model,
+                    tokenizer,
+                    prompt,
+                    config
+                )
+                print(f"\n📝 Generated Output:")
+                print("-" * 50)
+                print(generated_text)
+                print("-" * 50)
+            
+            except Exception as e:
+                print(f"⚠️ Error during generation: {str(e)}")
+                continue
+                
+    except KeyboardInterrupt:
+        print("\n👋 Goodbye!")
     except Exception as e:
-        print(f"⚠️ Error: {str(e)}")
+        print(f"⚠️ Fatal error: {str(e)}")
+        raise
 
-# -----------------------------------------------
-# Entry Point
-# -----------------------------------------------
 if __name__ == "__main__":
     main()
