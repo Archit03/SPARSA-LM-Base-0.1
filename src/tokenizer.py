@@ -547,11 +547,11 @@ class MedicalTokenizer:
     
     def __init__(
         self,
-        vocab_size: Optional[int] = 60000,
+        vocab_size: Optional[int] = None,
         min_frequency: int = 2,
         padding_strategy: str = 'longest',
         truncation_strategy: str = 'longest_first',
-        max_length: int = 28,
+        max_length: int = 128,
         normalize: bool = True
     ):
         # Initialize tokenizer with BPE model and special tokens
@@ -653,10 +653,6 @@ class MedicalTokenizer:
                 special_tokens=[]  # Empty sequence for fallback
             )
 
-    def _calculate_dynamic_vocab_size(self) -> int:
-        """Calculate vocabulary size."""
-        return 60000  # Fixed vocabulary size
-
     def _analyze_dataset_vocabulary(self) -> int:
         """Analyze dataset to count unique tokens."""
         if not hasattr(self.tokenizer, 'pre_tokenizer') or self.tokenizer.pre_tokenizer is None:
@@ -721,7 +717,7 @@ class MedicalTokenizer:
         texts: Union[str, List[str]],
         padding: bool = True,
         truncation: bool = True,
-        max_length: Optional[int] = None,
+        max_length: Optional[int] = 128,
         return_tensors: bool = True
     ) -> Dict[str, Union[List[int], Tensor]]:
         """Enhanced encoding with configurable padding and truncation."""
@@ -1038,58 +1034,66 @@ class DatasetProcessor:
 
 
 class TokenizerTrainer:
-    """Trainer class for tokenizer with enhanced features"""
-    
-    def __init__(self, vocab_size: int = 32000, min_frequency: int = 2):
+    def __init__(
+        self,
+        vocab_size: int = 4000,
+        min_frequency: int = 2,
+        files: Optional[List[str]] = None,
+        texts: Optional[List[str]] = None
+    ):
+        """Initialize tokenizer trainer with specified parameters."""
         self.vocab_size = vocab_size
         self.min_frequency = min_frequency
-        self.tokenizer = Tokenizer(BPE())
+        self.files = files
+        self.texts = texts
+        
+        # Initialize tokenizer with BPE model
+        self.tokenizer = Tokenizer(BPE(dropout=0.1, unk_token="[UNK]"))
+        
+        # Set up ByteLevel pre-tokenizer and decoder
+        self.tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
+        self.tokenizer.decoder = ByteLevel()
+        
+        # Configure trainer
         self.trainer = BpeTrainer(
             vocab_size=vocab_size,
             min_frequency=min_frequency,
-            special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"],
+            special_tokens=["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"],
+            initial_alphabet=ByteLevel.alphabet(),
             show_progress=True
         )
-        self.texts = []
-        self.files = []
+        
+        self.texts_buffer = []
+        self.buffer_size = 10000
 
-    def add_files(self, path: Union[str, Path]) -> 'TokenizerTrainer':
-        """Add files for training"""
-        try:
-            if isinstance(path, str):
-                path = Path(path)
-                
-            if isinstance(path, Path):
-                if path.is_file():
-                    self.files.append(str(path))
-                elif path.is_dir():
-                    self.files.extend([str(f) for f in path.glob("*.txt")])
-            else:
-                logging.warning(f"Skipping invalid path: {path}")
-                
-        except Exception as e:
-            logging.error(f"Error adding file {path}: {str(e)}")
-            
-        return self
-
-    def add_texts(self, texts: Union[str, List[str], Iterator[str]]) -> 'TokenizerTrainer':
-        """Add texts for training"""
+    def add_texts(self, texts: Union[str, List[str]]) -> None:
+        """Add texts to the training buffer."""
         if isinstance(texts, str):
-            self.texts.append(texts)
-        elif isinstance(texts, (list, Iterator)):
-            for text in texts:
-                if isinstance(text, dict):
-                    # Handle dataset dictionary format
-                    text = text.get('text', '')
-                if text and isinstance(text, str):
-                    self.texts.append(text)
-        return self
+            texts = [texts]
+        
+        self.texts_buffer.extend(texts)
+        
+        if len(self.texts_buffer) >= self.buffer_size:
+            self._process_buffer()
+
+    def _process_buffer(self) -> None:
+        """Process and clear the text buffer."""
+        if self.texts:
+            self.texts.extend(self.texts_buffer)
+        else:
+            self.texts = self.texts_buffer.copy()
+        self.texts_buffer = []
 
     def train(self) -> Tokenizer:
-        """Train the tokenizer"""
+        """Train the tokenizer with specified configuration."""
         try:
-            # Set up pre-tokenizer
+            # Process any remaining texts in buffer
+            if self.texts_buffer:
+                self._process_buffer()
+            
+            # Set up pre-tokenizer and decoder
             self.tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
+            self.tokenizer.decoder = ByteLevel()
             
             # Train from files if available
             if self.files:
@@ -1103,6 +1107,15 @@ class TokenizerTrainer:
             
             if not self.files and not self.texts:
                 raise ValueError("No training data provided")
+            
+            # Verify configuration after training
+            model_config = self.tokenizer.get_model()
+            if not model_config.dropout == 0.1:
+                logging.warning("Dropout value not properly set")
+            if not model_config.unk_token == "[UNK]":
+                logging.warning("UNK token not properly set")
+            if not isinstance(self.tokenizer.decoder, ByteLevel):
+                logging.warning("ByteLevel decoder not properly set")
             
             return self.tokenizer
             
