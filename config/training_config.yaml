@@ -1,42 +1,42 @@
 training:
   device: "cuda"
-  epochs: 5              
-  batch_size: 2  # 🔹 Small batch size for 4GB VRAM stability
-  learning_rate: 2e-4  # 🔹 Kept higher for faster convergence
-  weight_decay: 0.01     
-  max_grad_norm: 1.0     
-  gradient_accumulation_steps: 16  # 🔹 Ensures training stability
-  seed: 42               
+  epochs: 10
+  batch_size: 8  # Small batch size for 4GB VRAM stability
+  learning_rate: 0.0001  # ✅ Lowered for better generalization (float format)
+  weight_decay: 0.05  # ✅ Increased for stronger regularization
+  max_grad_norm: 0.5  # ✅ Prevents exploding gradients
+  gradient_accumulation_steps: 16
+  seed: 42
   resume_from_checkpoint: null
   checkpoint_dir: "checkpoints"
   checkpoint_save_frequency: 1
-  scheduler_type: "cosine_with_min_lr"  # 🔹 Stable LR decay
+  scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs:
-    min_lr: 1e-6  # ✅ Keep stable min_lr
-  warmup_ratio: 0.1               
-  log_every_n_steps: 100  # 🔹 Reduce logging frequency
+    min_lr: 0.000001  # ✅ Float format
+  warmup_ratio: 0.2  # ✅ Increased to stabilize early training
+  log_every_n_steps: 200  # ✅ Reduce logging frequency for efficiency
   eval_every_n_epochs: 1
-  early_stopping_patience: 3
-  use_mixed_precision: true        
-  amp_scaler_init_scale: 8192  # 🔹 Reduced to prevent NaN loss issues
-  use_gradient_checkpointing: false  # 🔹 Disabled for small models
-  enable_gradient_accumulation: true  
-  max_grad_value: 100.0  
-  use_noise_injection: true  
+  early_stopping_patience: 5  # ✅ Increased patience to prevent premature stopping
+  use_mixed_precision: true
+  amp_scaler_init_scale: 4096  # ✅ Lowered to prevent NaN loss issues
+  use_gradient_checkpointing: true  # ✅ Enabled for memory efficiency
+  enable_gradient_accumulation: true
+  max_grad_value: 10.0  # ✅ More conservative gradient clipping
+  use_noise_injection: true  # ✅ Helps reduce overfitting
 
 dataset:
   train_dataset: "local_data"
-  max_seq_len: 64  # 🔹 Small sequence length for small model
-  num_workers: 0  # 🔹 Reduce to avoid DataLoader stalls
+  max_seq_len: 128  # ✅ Increased for better context
+  num_workers: 0
   shuffle: true
-  pin_memory: true  # 🔹 Speed up GPU transfers
-  prefetch_factor: 2  # 🔹 Improve data pipeline efficiency
-  persistent_workers: false  # 🔹 Prevent stuck processes in DataLoader
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: false
   preprocessing:
     lowercase: true
     min_length: 5
   split:
-    test_size: 0.2
+    test_size: 0.25  # ✅ Increased validation size to detect overfitting
     random_state: 42
 
 tokenizer:
@@ -44,34 +44,34 @@ tokenizer:
   add_special_tokens: true
 
 model:
-  d_model: 48  # 🔹 Reduced to stay under 100K parameters
-  num_layers: 2  # 🔹 Small Transformer model
-  num_heads: 1  # 🔹 Minimized for efficiency
-  ff_dim: 96  # 🔹 Balanced to stay under 100K
-  dropout: 0.1  
-  vocab_size: 512  # ✅ Small vocabulary for 5MB dataset
-  max_seq_len: 64  # ✅ Adjusted to match dataset
-  use_checkpointing: false  # 🔹 Not needed for small model
-  activation: "gelu"  
-  tie_embeddings: true  # ✅ Saves parameters by sharing weights
-  window_size: 2  
-  global_tokens: 0  
-  use_reentrant: false  
+  hidden_dim: 48
+  num_layers: 3  # ✅ Added one more layer for better generalization
+  num_heads: 2  # ✅ More heads for better representation
+  ff_dim: 128  # ✅ Increased to improve feature extraction
+  dropout: 0.4  # ✅ Higher dropout to reduce overfitting
+  vocab_size: 8192  # ✅ Increased for better tokenization
+  max_seq_len: 128  # ✅ Matched with dataset max_seq_len
+  use_checkpointing: true
+  activation: "gelu"
+  tie_embeddings: true
+  window_size: 2
+  global_tokens: 0
+  use_reentrant: false
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: false
+  use_wandb: true
   wandb_project: "LuminaLM_Base_Small"
   wandb_entity: null
-  log_gradients: false  # 🔹 Disable gradient logging to speed up training
-  log_model_weights: false  # 🔹 Reduce logging overhead
+  log_gradients: false
+  log_model_weights: false
   log_train_steps: true
-  log_frequency: 500  # 🔹 Reduce frequent logging to avoid slowdowns
-  gradient_logging_frequency: 2000
+  log_frequency: 1000  # ✅ Reduce logging frequency
+  gradient_logging_frequency: 5000
 
 memory_monitor:
   enabled: true
   log_frequency: 10
   monitor_gpu: true
   monitor_cpu: true
-  empty_cache: true  # 🔹 Enable explicit CUDA memory clearance after each batch
+  empty_cache: true

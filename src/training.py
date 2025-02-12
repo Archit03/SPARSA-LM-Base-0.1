@@ -307,7 +307,7 @@ class Trainer:
             self.scheduler = self._configure_scheduler(self.optimizer, self.config['training'], num_training_steps)
 
             # Loss Function
-            self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
+            self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id, label_smoothing=0.05)
 
             # Memory Monitor
             self.memory_monitor = MemoryMonitor()
@@ -575,7 +575,7 @@ class Trainer:
 
     def train_one_epoch(self, epoch: int) -> Tuple[float, float]:
         """
-        Training loop with enhanced stability measures and proper gradient handling
+        Training loop with fixed gradient scaling implementation
         """
         self.model.train()
         total_loss = 0.0
@@ -583,14 +583,14 @@ class Trainer:
         accumulation_counter = 0
         accum_loss = 0.0
 
-        # Initialize gradient scaler with more conservative settings
+        # Initialize gradient scaler with conservative settings
         if not hasattr(self, 'scaler') or self.scaler is None:
             self.scaler = GradScaler(
                 enabled=self.config['training'].get('use_mixed_precision', True),
-                init_scale=2**10,  # Start with a smaller scale
-                growth_factor=1.5,  # More conservative growth
+                init_scale=2**10,
+                growth_factor=1.5,
                 backoff_factor=0.5,
-                growth_interval=100  # Increase scale less frequently
+                growth_interval=100
             )
 
         progress_bar = tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}")
@@ -600,39 +600,21 @@ class Trainer:
 
         for step, batch in enumerate(progress_bar):
             try:
-                # 1. Data Preparation with stability checks
+                # Data Preparation
                 encoder_input_ids = batch["encoder_input_ids"].to(self.device).long()
                 encoder_attention_mask = batch["encoder_attention_mask"].to(self.device)
                 decoder_input_ids = batch["decoder_input_ids"].to(self.device).long()
                 decoder_attention_mask = batch["decoder_attention_mask"].to(self.device)
                 labels = batch["labels"].to(self.device).long()
 
-                self.logger.info(f"encoder_input_ids dtype: {encoder_input_ids.dtype}, shape: {encoder_input_ids.shape}")
-                self.logger.info(f"decoder_input_ids dtype: {decoder_input_ids.dtype}, shape: {decoder_input_ids.shape}")
-                self.logger.info(f"labels dtype: {labels.dtype}, shape: {labels.shape}")
-
-                # 🔹 If you get a FloatTensor, force convert with .to(torch.long) again
-                if encoder_input_ids.dtype != torch.long:
-                    encoder_input_ids = encoder_input_ids.to(torch.long)
-                if decoder_input_ids.dtype != torch.long:
-                    decoder_input_ids = decoder_input_ids.to(torch.long)
-                if labels.dtype != torch.long:
-                    labels = labels.to(torch.long)
-                    
                 # Add stability check for input values
                 if not (torch.isfinite(encoder_input_ids).all() and torch.isfinite(decoder_input_ids).all()):
                     self.logger.warning(f"Step {step} - Non-finite values in input tensors, skipping batch")
                     continue
 
-                # 2. Forward Pass with enhanced numerical stability
+                # Forward Pass with enhanced numerical stability
                 with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu",
                                         enabled=self.config['training'].get('use_mixed_precision', True)):
-                    # Add noise for stability
-                    if self.config['training'].get('use_noise_injection', True):
-                        noise_scale = 1e-8
-                        encoder_input_ids = encoder_input_ids + torch.randn_like(encoder_input_ids.float()) * noise_scale
-                        decoder_input_ids = decoder_input_ids + torch.randn_like(decoder_input_ids.float()) * noise_scale
-
                     outputs = self.model(
                         src=encoder_input_ids,
                         tgt=decoder_input_ids,
@@ -645,10 +627,10 @@ class Trainer:
                         self.logger.warning(f"Step {step} - Non-finite values in model output, skipping batch")
                         continue
 
-                    # 3. Loss Computation with stability measures
+                    # Loss Computation
                     flat_outputs = outputs.view(-1, outputs.size(-1))
                     flat_labels = labels.view(-1)
-
+                    
                     # Add small epsilon to prevent exact zeros
                     eps = 1e-8
                     flat_outputs = flat_outputs + eps
@@ -663,60 +645,37 @@ class Trainer:
                     # Scale loss for accumulation
                     loss = loss / self.gradient_accumulation_steps
 
-                # 4. Backward Pass with gradient scaling
+                # Backward Pass with gradient scaling
                 self.scaler.scale(loss).backward()
 
                 # Accumulate statistics
                 accumulation_counter += 1
                 accum_loss += loss.item()
 
-                # 5. Optimization Step
+                # Optimization Step
                 if accumulation_counter == self.gradient_accumulation_steps:
-                    # Unscale gradients - ONLY ONCE per optimization step
-                    self.scaler.unscale_(self.optimizer)
-
-                    # Check gradient validity
-                    valid_gradients = True
-                    grad_norm = 0.0
-                    max_grad_value = 0.0
-
-                    for name, param in self.model.named_parameters():
-                        if param.grad is not None:
-                            grad_value = param.grad.abs().max().item()
-                            max_grad_value = max(max_grad_value, grad_value)
-
-                            if not torch.isfinite(param.grad).all():
-                                self.logger.warning(f"NaN/Inf detected in gradients of {name}")
-                                valid_gradients = False
-                                break
-
-                            grad_norm += param.grad.norm().item() ** 2
-
-                    grad_norm = grad_norm ** 0.5
-
-                    # Additional stability check
-                    if max_grad_value > self.config['training'].get('max_grad_value', 100.0):
-                        self.logger.warning(f"Step {step} - Gradient value too large: {max_grad_value}")
-                        valid_gradients = False
-
-                    if valid_gradients:
-                        # Clip gradients
+                    # Gradient clipping should be done before unscaling
+                    if self.config['training'].get('max_grad_norm', 0.0) > 0:
+                        self.scaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(
                             self.model.parameters(),
                             self.config['training'].get('max_grad_norm', 1.0)
                         )
 
-                        # Optimizer step and update scaler
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
+                    # Step with scaler
+                    scale_before = self.scaler.get_scale()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    scale_after = self.scaler.get_scale()
+                    optimizer_stepped = scale_before <= scale_after
 
-                        # Adjust learning rate
-                        if self.scheduler is not None:
-                            self.scheduler.step()
+                    # Only step scheduler if optimizer stepped
+                    if optimizer_stepped and self.scheduler is not None:
+                        self.scheduler.step()
 
-                        # Update statistics
-                        total_loss += accum_loss
-                        step_in_epoch += 1
+                    # Update statistics
+                    total_loss += accum_loss
+                    step_in_epoch += 1
 
                     # Reset for next accumulation
                     self.optimizer.zero_grad(set_to_none=True)
@@ -727,8 +686,7 @@ class Trainer:
                 current_lr = self.scheduler.get_last_lr()[0] if self.scheduler else self.config['training']['learning_rate']
                 progress_bar.set_postfix({
                     'loss': loss.item(),
-                    'lr': f'{current_lr:.2e}',
-                    'grad_norm': f'{grad_norm:.2e}' if 'grad_norm' in locals() else 'N/A'
+                    'lr': f'{current_lr:.2e}'
                 })
 
             except RuntimeError as e:
@@ -736,6 +694,12 @@ class Trainer:
                     self._handle_oom_error()
                     continue
                 raise e
+
+            if self.use_wandb:
+                wandb.log({
+                    "train/loss": loss.item(),
+                    "train/learning_rate": current_lr
+                })
 
         avg_loss = total_loss / step_in_epoch if step_in_epoch > 0 else float('inf')
         return avg_loss, self._calculate_perplexity(avg_loss)
@@ -858,21 +822,21 @@ class Trainer:
             for epoch in range(self.start_epoch, self.config['training']['epochs']):
                 self.logger.info(f"\n{'='*50}")
                 self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
-                
+
                 # Log memory status at start of epoch
                 if torch.cuda.is_available():
                     self.logger.info(f"GPU Memory before epoch: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
-                
+
                 train_loss, train_ppl = self.train_one_epoch(epoch)
                 self.logger.info(f"Epoch {epoch + 1} Training - Loss: {train_loss:.4f}, Perplexity: {train_ppl:.2f}")
-                
+
                 val_loss, val_ppl = self.validate(epoch)
                 self.logger.info(f"Epoch {epoch + 1} Validation - Loss: {val_loss:.4f}, Perplexity: {val_ppl:.2f}")
-                
+
                 # Debug early stopping variables
                 self.logger.info(f"Current val_loss: {val_loss:.4f}, Best val_loss: {best_val_loss:.4f}")
                 self.logger.info(f"Early stopping counter: {self.stopping_counter}/{self.early_stopping_patience}")
-                
+
                 # Early stopping check with detailed logging
                 if self._early_stopping(val_loss):
                     self.logger.warning(f"Early stopping triggered at epoch {epoch + 1}")
@@ -880,7 +844,7 @@ class Trainer:
                     self.logger.warning(f"Best validation loss achieved: {self.best_metric:.4f}")
                     break
 
-                # Save checkpoint if validation loss improved
+                # ✅ Save best model checkpoint if validation loss improves
                 if val_loss < best_val_loss:
                     self.logger.info(f"Validation loss improved from {best_val_loss:.4f} to {val_loss:.4f}")
                     best_val_loss = val_loss
@@ -894,10 +858,28 @@ class Trainer:
                         'stopping_counter': self.stopping_counter,  # Save early stopping state
                         'best_metric': self.best_metric
                     }, best_model_path)
-                    
                     self.logger.info(f"Saved best model checkpoint at epoch {epoch + 1}")
                 else:
                     self.logger.info(f"Validation loss did not improve from {best_val_loss:.4f}")
+
+                # ✅ Save latest checkpoint every epoch
+                latest_checkpoint_path = os.path.join(
+                    self.config['training']['checkpoint_dir'],
+                    'latest_LuminaLM_model_checkpoint.pt'  # ✅ Always overwrites latest checkpoint
+                )
+
+                torch.save({
+                    'model_name': 'LuminaLM',
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'loss': val_loss,
+                    'stopping_counter': self.stopping_counter,  # Save early stopping state
+                    'best_metric': self.best_metric
+                }, latest_checkpoint_path)
+
+                self.logger.info(f"Saved latest model checkpoint after epoch {epoch + 1}")
 
                 # Log learning rate
                 current_lr = self.scheduler.get_last_lr()[0]
@@ -912,6 +894,7 @@ class Trainer:
             self.logger.error(f"Training failed with error: {str(e)}")
             self.logger.error(f"Error traceback: {traceback.format_exc()}")
             raise
+
 
 # ----------------------------------------------------------------------
 # Main function

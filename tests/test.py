@@ -33,8 +33,8 @@ def test_tokenizer(tokenizer_path):
             logging.info(f"✅ All special tokens present: {special_tokens}")
 
         # Test padding
-        tokenizer.enable_padding(length=128)  # Ensure tokenizer has padding enabled
-        encoded.pad(128)
+        tokenizer.enable_padding(length=64)  # Ensure tokenizer has padding enabled
+        encoded.pad(64)
         logging.info(f"🔢 Padded Tokens: {encoded.tokens}")
         logging.info(f"🔢 Padded Token IDs: {encoded.ids}")
 
@@ -43,7 +43,7 @@ def test_tokenizer(tokenizer_path):
             "This is a very long sentence that exceeds the maximum length set for the tokenizer. "
             "The tokenizer should truncate this input correctly when truncation is enabled."
         )
-        tokenizer.enable_truncation(max_length=128)
+        tokenizer.enable_truncation(max_length=64)
         encoded_long = tokenizer.encode(long_sentence)
         logging.info(f"🔢 Truncated Tokens: {encoded_long.tokens}")
         logging.info(f"🔢 Truncated Token IDs: {encoded_long.ids}")
