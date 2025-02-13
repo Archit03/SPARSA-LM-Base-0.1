@@ -1,32 +1,32 @@
 training:
   device: "cuda"
-  epochs: 10
-  batch_size: 8  # Small batch size for 4GB VRAM stability
-  learning_rate: 0.0001  # ✅ Lowered for better generalization (float format)
-  weight_decay: 0.05  # ✅ Increased for stronger regularization
-  max_grad_norm: 0.5  # ✅ Prevents exploding gradients
-  gradient_accumulation_steps: 16
+  epochs: 2                   # Minimal epochs for a quick sanity check
+  batch_size: 4               # Small batch size
+  learning_rate: 0.00003      # Lower LR to reduce risk of NaNs
+  weight_decay: 0.1
+  max_grad_norm: 0.3
+  gradient_accumulation_steps: 1
   seed: 42
   resume_from_checkpoint: null
   checkpoint_dir: "checkpoints"
   checkpoint_save_frequency: 1
   scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs:
-    min_lr: 0.000001  # ✅ Float format
-  warmup_ratio: 0.2  # ✅ Increased to stabilize early training
-  log_every_n_steps: 200  # ✅ Reduce logging frequency for efficiency
+    min_lr: 1e-6  
+  warmup_ratio: 0.1
+  log_every_n_steps: 10
   eval_every_n_epochs: 1
-  early_stopping_patience: 5  # ✅ Increased patience to prevent premature stopping
-  use_mixed_precision: true
-  amp_scaler_init_scale: 4096  # ✅ Lowered to prevent NaN loss issues
-  use_gradient_checkpointing: true  # ✅ Enabled for memory efficiency
-  enable_gradient_accumulation: true
-  max_grad_value: 10.0  # ✅ More conservative gradient clipping
-  use_noise_injection: true  # ✅ Helps reduce overfitting
+  early_stopping_patience: 2
+  use_mixed_precision: false
+  amp_scaler_init_scale: 1024
+  use_gradient_checkpointing: false
+  enable_gradient_accumulation: false
+  max_grad_value: 5.0
+  use_noise_injection: false
 
 dataset:
   train_dataset: "local_data"
-  max_seq_len: 128  # ✅ Increased for better context
+  max_seq_len: 64
   num_workers: 0
   shuffle: true
   pin_memory: true
@@ -36,7 +36,7 @@ dataset:
     lowercase: true
     min_length: 5
   split:
-    test_size: 0.25  # ✅ Increased validation size to detect overfitting
+    test_size: 0.2
     random_state: 42
 
 tokenizer:
@@ -44,14 +44,14 @@ tokenizer:
   add_special_tokens: true
 
 model:
-  hidden_dim: 48
-  num_layers: 3  # ✅ Added one more layer for better generalization
-  num_heads: 2  # ✅ More heads for better representation
-  ff_dim: 128  # ✅ Increased to improve feature extraction
-  dropout: 0.4  # ✅ Higher dropout to reduce overfitting
-  vocab_size: 8192  # ✅ Increased for better tokenization
-  max_seq_len: 128  # ✅ Matched with dataset max_seq_len
-  use_checkpointing: true
+  hidden_dim: 32
+  num_layers: 2
+  num_heads: 2
+  ff_dim: 64
+  dropout: 0.3     # Slightly less dropout than before
+  vocab_size: 8192
+  max_seq_len: 64
+  use_checkpointing: false
   activation: "gelu"
   tie_embeddings: true
   window_size: 2
@@ -60,13 +60,13 @@ model:
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: true
+  use_wandb: false
   wandb_project: "LuminaLM_Base_Small"
   wandb_entity: null
   log_gradients: false
   log_model_weights: false
   log_train_steps: true
-  log_frequency: 1000  # ✅ Reduce logging frequency
+  log_frequency: 1000
   gradient_logging_frequency: 5000
 
 memory_monitor:

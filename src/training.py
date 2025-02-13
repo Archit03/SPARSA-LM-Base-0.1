@@ -15,12 +15,13 @@ import traceback
 # ----------------------------------------------------------------------
 # Import your dataset/module references:
 # ----------------------------------------------------------------------
-from dataset import DatasetProcessor, TextDataset
+from dataset import DatasetProcessor, TextDataset, add_noise_to_input
 from model import Transformer, TransformerConfig
 from utils import setup_logging, save_checkpoint, load_checkpoint, set_seed, MemoryMonitor
 from torch.amp import GradScaler
 import optuna
 from sklearn.model_selection import train_test_split
+
 
 # ----------------------------------------------------------------------
 # Debugging Utilities
@@ -59,12 +60,7 @@ def validate_model_outputs(outputs: torch.Tensor,
     Validate model outputs and labels before loss calculation.
     """
     try:
-        # 1. Dimension check: outputs should be [batch_size, seq_len, vocab_size]
-        #    labels should be [batch_size, seq_len] if not flattened yet.
-        #    Alternatively, if using flattened shapes, you must adjust accordingly.
-        
-        # If you're flattening them after you get them from the model,
-        # check the dimension difference (outputs dim = labels dim + 1).
+        # 1. Dimension check
         if outputs.dim() != labels.dim() + 1:
             logger.error(f"Dimension mismatch: outputs={outputs.shape}, labels={labels.shape}")
             return False
@@ -77,8 +73,6 @@ def validate_model_outputs(outputs: torch.Tensor,
         
         # 3. Validate label values against vocab_size
         flat_labels = labels.view(-1)
-        # Typically, -100 is used for ignore_index in CrossEntropyLoss
-        # So the only valid range is: [0, vocab_size - 1] or exactly -100
         invalid_labels = (flat_labels >= vocab_size) & (flat_labels != -100)
         if invalid_labels.any():
             invalid_indices = torch.where(invalid_labels)[0]
@@ -111,8 +105,7 @@ def debug_loss_inputs(outputs: torch.Tensor,
     and checking dimension / range correctness.
     """
     try:
-        # Flatten the outputs to [batch_size*seq_len, vocab_size]
-        # Flatten labels to [batch_size*seq_len]
+        # Flatten the outputs and labels
         flat_outputs = outputs.view(-1, outputs.size(-1))
         flat_labels = labels.view(-1)
         
@@ -168,7 +161,7 @@ class Trainer:
             # Setup logging
             self.logger = setup_logging(self.config['logging']['log_dir'], name='LuminaLM_trainer')
 
-            # Initialize Weights & Biases (W&B)
+            # Initialize W&B
             if self.config['logging'].get('use_wandb', True):
                 wandb.init(
                     project=self.config['logging'].get('wandb_project', 'LuminaLM-training'),
@@ -249,7 +242,6 @@ class Trainer:
                     self.logger.warning("`min_lr` not found in `lr_scheduler_kwargs`, using default 1e-6")
                     lr_scheduler_kwargs['min_lr'] = 1e-6
 
-
             if scheduler_type == "cosine_with_min_lr" and 'min_lr' not in lr_scheduler_kwargs and 'min_lr_rate' not in lr_scheduler_kwargs:
                 raise ValueError("`lr_scheduler_kwargs` must contain either `min_lr` or `min_lr_rate`.")
 
@@ -283,7 +275,9 @@ class Trainer:
                 pad_token_id=self.tokenizer.pad_token_id,
                 l2_reg=self.config['training'].get('l2_reg', 0.0),
                 use_checkpointing=self.config['model'].get('use_checkpointing', False),
-                use_reentrant=checkpointing_params.get('use_reentrant', False)
+                use_reentrant=checkpointing_params.get('use_reentrant', False),
+                noise_type=self.config['training'].get('noise_type', 'mask'),
+                noise_prob=self.config['training'].get('noise_prob', 0.3)
             )
 
             # Initialize Model
@@ -299,6 +293,7 @@ class Trainer:
                     module.weight.data.fill_(1.0)
 
             self.model.apply(_init_weights) 
+
             # Optimizer Setup
             self.optimizer = self._configure_optimizer()
 
@@ -336,7 +331,9 @@ class Trainer:
             self.model = torch.nn.DataParallel(self.model)
             self.logger.info(f"Using {torch.cuda.device_count()} GPUs for LuminaLM")
     
-    # Modified scheduler initialization code
+    # ----------------------------------------------------------------------
+    # Configure Scheduler
+    # ----------------------------------------------------------------------
     def _configure_scheduler(self, optimizer, config, num_training_steps):
         """
         Configure the learning rate scheduler with proper handling of cosine with min LR.
@@ -366,11 +363,13 @@ class Trainer:
         else:
             raise ValueError(f"Unknown scheduler type: {scheduler_type}")
 
+    # ----------------------------------------------------------------------
+    # Configure Optimizer
+    # ----------------------------------------------------------------------
     def _configure_optimizer(self):
         """
         Modified optimizer configuration with improved numerical stability
         """
-        # Separate parameters for weight decay
         decay_params = []
         no_decay_params = []
 
@@ -400,18 +399,17 @@ class Trainer:
             }
         ]
 
-        # Initialize optimizer with stable defaults
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters,
             lr=self.config['training']['learning_rate'],
             betas=(0.9, 0.999),
             eps=1e-8,
             weight_decay=self.config['training']['weight_decay'],
-            amsgrad=True  # Enable AMS-Grad for better stability
+            amsgrad=True
         )
 
         return optimizer
-    
+
     def _validate_config(self, config: Dict):
         """
         Comprehensive configuration validation to ensure required keys exist.
@@ -447,7 +445,6 @@ class Trainer:
         """
         Calculate perplexity from a scalar loss value.
         """
-        # Because exp(loss) can overflow, we wrap it in float().
         return float(torch.exp(torch.tensor(loss)))
 
     def _early_stopping(self, val_metric: float) -> bool:
@@ -515,7 +512,6 @@ class Trainer:
             "train/step": step,
         }
 
-        # Log memory stats if on GPU
         if torch.cuda.is_available():
             metrics.update({
                 "system/gpu_memory_allocated": torch.cuda.memory_allocated(),
@@ -543,11 +539,9 @@ class Trainer:
             torch.cuda.empty_cache()
         self.logger.warning("OOM detected. Attempting to recover...")
 
-        # Potentially reduce batch size or other strategies
         if self.config['training']['batch_size'] > 1:
             self.config['training']['batch_size'] //= 2
             self.logger.warning(f"Reduced batch size to {self.config['training']['batch_size']}")
-            # Recreate data loaders with new batch size
             self._setup_dataloaders()
 
     def _setup_dataloaders(self):
@@ -575,7 +569,10 @@ class Trainer:
 
     def train_one_epoch(self, epoch: int) -> Tuple[float, float]:
         """
-        Training loop with fixed gradient scaling implementation
+        Training loop with single noise injection (only from the dataset),
+        plus standard gradient accumulation and mixed precision.
+        Ensures unscale_() is called exactly once per update to avoid
+        'unscale_() has already been called...' errors.
         """
         self.model.train()
         total_loss = 0.0
@@ -583,7 +580,7 @@ class Trainer:
         accumulation_counter = 0
         accum_loss = 0.0
 
-        # Initialize gradient scaler with conservative settings
+        # Re-init scaler if needed
         if not hasattr(self, 'scaler') or self.scaler is None:
             self.scaler = GradScaler(
                 enabled=self.config['training'].get('use_mixed_precision', True),
@@ -594,27 +591,26 @@ class Trainer:
             )
 
         progress_bar = tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}")
-
-        # Clear gradients at start
         self.optimizer.zero_grad(set_to_none=True)
 
         for step, batch in enumerate(progress_bar):
             try:
-                # Data Preparation
+                # -------------------------------
+                # 1) Move batch to device
+                # -------------------------------
                 encoder_input_ids = batch["encoder_input_ids"].to(self.device).long()
                 encoder_attention_mask = batch["encoder_attention_mask"].to(self.device)
                 decoder_input_ids = batch["decoder_input_ids"].to(self.device).long()
                 decoder_attention_mask = batch["decoder_attention_mask"].to(self.device)
                 labels = batch["labels"].to(self.device).long()
 
-                # Add stability check for input values
-                if not (torch.isfinite(encoder_input_ids).all() and torch.isfinite(decoder_input_ids).all()):
-                    self.logger.warning(f"Step {step} - Non-finite values in input tensors, skipping batch")
-                    continue
-
-                # Forward Pass with enhanced numerical stability
-                with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu",
-                                        enabled=self.config['training'].get('use_mixed_precision', True)):
+                # -------------------------------
+                # 2) Forward pass (autocast)
+                # -------------------------------
+                with torch.amp.autocast(
+                    device_type="cuda" if torch.cuda.is_available() else "cpu",
+                    enabled=self.config['training'].get('use_mixed_precision', True)
+                ):
                     outputs = self.model(
                         src=encoder_input_ids,
                         tgt=decoder_input_ids,
@@ -622,71 +618,104 @@ class Trainer:
                         tgt_mask=decoder_attention_mask
                     )
 
-                    # Check outputs before loss calculation
+                    # If outputs contain NaN/Inf, skip
                     if not torch.isfinite(outputs).all():
                         self.logger.warning(f"Step {step} - Non-finite values in model output, skipping batch")
                         continue
 
-                    # Loss Computation
+                    # Flatten for CE loss
                     flat_outputs = outputs.view(-1, outputs.size(-1))
                     flat_labels = labels.view(-1)
-                    
-                    # Add small epsilon to prevent exact zeros
+
+                    # Avoid log(0) issues by adding a tiny epsilon
                     eps = 1e-8
                     flat_outputs = flat_outputs + eps
 
                     loss = self.criterion(flat_outputs, flat_labels)
 
-                    # Check loss validity
+                    # If the loss is NaN/Inf, skip
                     if not torch.isfinite(loss):
                         self.logger.warning(f"Step {step} - Non-finite loss detected, skipping batch")
                         continue
 
-                    # Scale loss for accumulation
+                    # Scale loss if gradient accumulation
                     loss = loss / self.gradient_accumulation_steps
 
-                # Backward Pass with gradient scaling
+                # -------------------------------
+                # 3) Backward (scaled)
+                # -------------------------------
                 self.scaler.scale(loss).backward()
 
-                # Accumulate statistics
                 accumulation_counter += 1
                 accum_loss += loss.item()
 
-                # Optimization Step
+                # -------------------------------
+                # 4) Update step if accumulated
+                # -------------------------------
                 if accumulation_counter == self.gradient_accumulation_steps:
-                    # Gradient clipping should be done before unscaling
-                    if self.config['training'].get('max_grad_norm', 0.0) > 0:
-                        self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(
+                    # unscale_() => only once here
+                    self.scaler.unscale_(self.optimizer)
+
+                    # Check gradients after unscale_
+                    valid_gradients = True
+                    grad_norm = 0.0
+                    max_grad_value = 0.0
+
+                    for name, param in self.model.named_parameters():
+                        if param.grad is not None:
+                            grad_value = param.grad.abs().max().item()
+                            max_grad_value = max(max_grad_value, grad_value)
+
+                            if not torch.isfinite(param.grad).all():
+                                self.logger.warning(f"NaN/Inf detected in gradients of {name}")
+                                valid_gradients = False
+                                break
+
+                            grad_norm += param.grad.norm().item() ** 2
+
+                    grad_norm = grad_norm ** 0.5
+
+                    # If gradient is too large, also invalid
+                    if max_grad_value > self.config['training'].get('max_grad_value', 100.0):
+                        self.logger.warning(f"Step {step} - Gradient value too large: {max_grad_value}")
+                        valid_gradients = False
+
+                    if valid_gradients:
+                        # If everything is okay, we do gradient clipping + optimizer step
+                        clip_grad_norm_(
                             self.model.parameters(),
                             self.config['training'].get('max_grad_norm', 1.0)
                         )
 
-                    # Step with scaler
-                    scale_before = self.scaler.get_scale()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    scale_after = self.scaler.get_scale()
-                    optimizer_stepped = scale_before <= scale_after
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
 
-                    # Only step scheduler if optimizer stepped
-                    if optimizer_stepped and self.scheduler is not None:
-                        self.scheduler.step()
+                        if self.scheduler is not None:
+                            self.scheduler.step()
 
-                    # Update statistics
-                    total_loss += accum_loss
-                    step_in_epoch += 1
+                        total_loss += accum_loss
+                        step_in_epoch += 1
+                    else:
+                        # If gradients are invalid, skip the step
+                        self.logger.warning(f"Step {step} - Invalid gradients, skipping optimizer step.")
+                        self.scaler.update()  # still update the scaler so it can adjust scale
 
                     # Reset for next accumulation
                     self.optimizer.zero_grad(set_to_none=True)
                     accumulation_counter = 0
                     accum_loss = 0.0
 
-                # Update progress bar
-                current_lr = self.scheduler.get_last_lr()[0] if self.scheduler else self.config['training']['learning_rate']
+                # -------------------------------
+                # 5) Progress bar
+                # -------------------------------
+                current_lr = (
+                    self.scheduler.get_last_lr()[0]
+                    if self.scheduler else self.config['training']['learning_rate']
+                )
                 progress_bar.set_postfix({
                     'loss': loss.item(),
-                    'lr': f'{current_lr:.2e}'
+                    'lr': f'{current_lr:.2e}',
+                    'grad_norm': f'{grad_norm:.2e}' if 'grad_norm' in locals() else 'N/A'
                 })
 
             except RuntimeError as e:
@@ -695,62 +724,51 @@ class Trainer:
                     continue
                 raise e
 
+            # Optional W&B logging
             if self.use_wandb:
                 wandb.log({
                     "train/loss": loss.item(),
-                    "train/learning_rate": current_lr
+                    "train/learning_rate": self.scheduler.get_last_lr()[0]
                 })
 
+        # Summarize
         avg_loss = total_loss / step_in_epoch if step_in_epoch > 0 else float('inf')
         return avg_loss, self._calculate_perplexity(avg_loss)
 
     @torch.no_grad()
     def validate(self, epoch: int) -> Tuple[float, float]:
         """
-        Validate (evaluate) the model on the validation set.
+        Validation loop with a single round of noise (or no noise) from the dataset.
+        Typically, you'd keep validation data clean. But if your dataset
+        is already noising in __getitem__(), that applies here too.
         """
         self.model.eval()
         total_loss = 0.0
         valid_steps = 0
-
         progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
 
         for step, batch in enumerate(progress_bar):
             try:
-                # Extract and move tensors to device
                 encoder_input_ids = batch.get("encoder_input_ids", None)
                 encoder_attention_mask = batch.get("encoder_attention_mask", None)
                 decoder_input_ids = batch.get("decoder_input_ids", None)
                 decoder_attention_mask = batch.get("decoder_attention_mask", None)
                 labels = batch.get("labels", None)
 
-                if (
-                    encoder_input_ids is None 
-                    or encoder_attention_mask is None 
-                    or decoder_input_ids is None
-                    or decoder_attention_mask is None
-                    or labels is None
-                ):
-                    self.logger.error(f"Step {step} - Missing keys in batch. Skipping batch...")
+                if not all(t is not None for t in [encoder_input_ids, encoder_attention_mask, decoder_input_ids, decoder_attention_mask, labels]):
+                    self.logger.error(f"Step {step} - Missing keys in batch. Skipping...")
                     continue
 
-                # Move tensors to device
                 encoder_input_ids = encoder_input_ids.to(self.device).long()
                 encoder_attention_mask = encoder_attention_mask.to(self.device)
                 decoder_input_ids = decoder_input_ids.to(self.device).long()
                 decoder_attention_mask = decoder_attention_mask.to(self.device)
                 labels = labels.to(self.device).long()
 
-                # Clamp labels to valid range (ignoring padding index -100)
-                labels = torch.where(labels != -100, torch.clamp(labels, 0, self.model.config.vocab_size - 1), labels)
-
-                # Check for invalid labels
-                if torch.any((labels < 0) | (labels >= self.model.config.vocab_size)):
-                    self.logger.error(f"Step {step} - Invalid label values detected: {labels[labels < 0].tolist()}")
-                    continue  # Skip bad batch
-
-                # Forward pass with mixed precision
-                with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu" ,enabled=self.config['training'].get('use_mixed_precision', True)):
+                with torch.amp.autocast(
+                    device_type="cuda" if torch.cuda.is_available() else "cpu",
+                    enabled=self.config['training'].get('use_mixed_precision', True)
+                ):
                     outputs = self.model(
                         src=encoder_input_ids,
                         tgt=decoder_input_ids,
@@ -758,30 +776,21 @@ class Trainer:
                         tgt_mask=decoder_attention_mask
                     )
 
-                # Ensure outputs do not contain NaN/Inf
                 if torch.isnan(outputs).any() or torch.isinf(outputs).any():
-                    self.logger.error(f"Step {step} - Model output contains NaN/Inf! Skipping batch.")
+                    self.logger.error(f"Step {step} - Model output contains NaN/Inf! Skipping...")
                     continue
 
-                # Flatten for cross-entropy loss
                 flat_outputs = outputs.view(-1, outputs.size(-1))
                 flat_labels = labels.view(-1)
-
-                # Compute loss
                 loss = self.criterion(flat_outputs, flat_labels)
-
-                # Ensure loss is valid before accumulating
                 if torch.isnan(loss) or torch.isinf(loss):
                     self.logger.error(f"Step {step} - NaN/Inf detected in loss! Skipping batch.")
                     continue
 
                 total_loss += loss.item()
-                valid_steps += 1  # Only count valid steps
-
-                # Log loss value
+                valid_steps += 1
                 self.logger.info(f"Step {step} - Validation Loss: {loss.item():.4f}")
 
-                # Log memory usage every N steps
                 if step % self.config['memory_monitor'].get('log_frequency', 100) == 0:
                     if self.memory_monitor:
                         self.memory_monitor.log_memory()
@@ -789,11 +798,9 @@ class Trainer:
             except Exception as e:
                 self.logger.error(f"Validation Error at Step {step}: {e}")
 
-        # Normalize loss over valid steps
         avg_loss = total_loss / valid_steps if valid_steps > 0 else float('inf')
         val_perplexity = self._calculate_perplexity(avg_loss)
 
-        # Log validation summary
         self.logger.info(
             f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, "
             f"Perplexity: {val_perplexity:.2f}"
@@ -810,7 +817,7 @@ class Trainer:
 
     def train(self) -> str:
         """
-        Modified training loop with enhanced logging for debugging early stopping issues
+        Main training entry.
         """
         try:
             best_val_loss = float('inf')
@@ -823,7 +830,6 @@ class Trainer:
                 self.logger.info(f"\n{'='*50}")
                 self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
 
-                # Log memory status at start of epoch
                 if torch.cuda.is_available():
                     self.logger.info(f"GPU Memory before epoch: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
 
@@ -833,18 +839,16 @@ class Trainer:
                 val_loss, val_ppl = self.validate(epoch)
                 self.logger.info(f"Epoch {epoch + 1} Validation - Loss: {val_loss:.4f}, Perplexity: {val_ppl:.2f}")
 
-                # Debug early stopping variables
                 self.logger.info(f"Current val_loss: {val_loss:.4f}, Best val_loss: {best_val_loss:.4f}")
                 self.logger.info(f"Early stopping counter: {self.stopping_counter}/{self.early_stopping_patience}")
 
-                # Early stopping check with detailed logging
                 if self._early_stopping(val_loss):
                     self.logger.warning(f"Early stopping triggered at epoch {epoch + 1}")
                     self.logger.warning(f"Final early stopping counter: {self.stopping_counter}")
                     self.logger.warning(f"Best validation loss achieved: {self.best_metric:.4f}")
                     break
 
-                # ✅ Save best model checkpoint if validation loss improves
+                # Save best model
                 if val_loss < best_val_loss:
                     self.logger.info(f"Validation loss improved from {best_val_loss:.4f} to {val_loss:.4f}")
                     best_val_loss = val_loss
@@ -855,19 +859,18 @@ class Trainer:
                         'optimizer_state_dict': self.optimizer.state_dict(),
                         'scheduler_state_dict': self.scheduler.state_dict(),
                         'loss': best_val_loss,
-                        'stopping_counter': self.stopping_counter,  # Save early stopping state
+                        'stopping_counter': self.stopping_counter,
                         'best_metric': self.best_metric
                     }, best_model_path)
                     self.logger.info(f"Saved best model checkpoint at epoch {epoch + 1}")
                 else:
                     self.logger.info(f"Validation loss did not improve from {best_val_loss:.4f}")
 
-                # ✅ Save latest checkpoint every epoch
+                # Save latest checkpoint each epoch
                 latest_checkpoint_path = os.path.join(
                     self.config['training']['checkpoint_dir'],
-                    'latest_LuminaLM_model_checkpoint.pt'  # ✅ Always overwrites latest checkpoint
+                    'latest_LuminaLM_model_checkpoint.pt'
                 )
-
                 torch.save({
                     'model_name': 'LuminaLM',
                     'epoch': epoch,
@@ -875,16 +878,14 @@ class Trainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'scheduler_state_dict': self.scheduler.state_dict(),
                     'loss': val_loss,
-                    'stopping_counter': self.stopping_counter,  # Save early stopping state
+                    'stopping_counter': self.stopping_counter,
                     'best_metric': self.best_metric
                 }, latest_checkpoint_path)
 
                 self.logger.info(f"Saved latest model checkpoint after epoch {epoch + 1}")
 
-                # Log learning rate
                 current_lr = self.scheduler.get_last_lr()[0]
                 self.logger.info(f"Current learning rate: {current_lr:.2e}")
-
                 self.logger.info(f"{'='*50}\n")
 
             self.logger.info("LuminaLM training completed.")
@@ -908,15 +909,12 @@ def main():
     data_config_path = 'config/training_data_config.yaml'
 
     try:
-        # Load training config
         with open(training_config_path, 'r') as f:
             training_config = yaml.safe_load(f)
 
-        # Load data config
         with open(data_config_path, 'r') as f:
             data_config = yaml.safe_load(f)
 
-        # Ensure model directory exists
         model_dir = 'model'
         os.makedirs(model_dir, exist_ok=True)
 
@@ -934,8 +932,6 @@ def main():
         logging.error(f"Training failed: {e}")
         raise
 
-# ----------------------------------------------------------------------
-# Entry Point
-# ----------------------------------------------------------------------
+
 if __name__ == "__main__":
     main()

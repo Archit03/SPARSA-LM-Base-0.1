@@ -2,7 +2,7 @@ datasets:
   - name: local_data
     type: local
     config:
-      source_dir: "C:/Users/ASUS/Desktop/PreProcessed/processed/cleaned/test"  # Ensure this directory exists
+      source_dir: "C:/Users/ASUS/Desktop/PreProcessed/processed/cleaned/test/test"  # Ensure this directory exists
       patterns:
         - "*.txt"
         - "*.csv"

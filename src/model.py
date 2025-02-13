@@ -7,6 +7,8 @@ import transformers
 from typing import Dict, Optional, List, Tuple, Union
 from torch.optim.lr_scheduler import LambdaLR
 import numpy as np
+import random
+
 
 
 """This code belongs to EllanorAI and is licensed under the EllanorAI Proprietary License."""
@@ -26,6 +28,10 @@ class TransformerConfig:
         d_ff: int,  # ff_dim in config
         max_seq_len: int,
         dropout: float,
+
+        #Noise insertions
+        noise_type: str = "mask",
+        noise_prob: float = 0.3,
         
         # Attention Mechanisms
         use_rope: bool = True,
@@ -49,7 +55,7 @@ class TransformerConfig:
         weight_decay: float = 0.1,
         warmup_ratio: float = 0.1,
         scheduler_type: str = "cosine_warmup",
-        lr_scheduler_kwargs: float = 1e-6,
+        lr_scheduler_kwargs: dict= None,
 
         init_scale: float = 0.02,
         layer_norm_eps: float = 1e-5,
@@ -104,13 +110,17 @@ class TransformerConfig:
         self.weight_decay = weight_decay
         self.warmup_ratio = warmup_ratio
         self.scheduler_type = scheduler_type
-        self.lr_scheduler_kwargs = lr_scheduler_kwargs
+        self.lr_scheduler_kwargs = lr_scheduler_kwargs or {"min_lr": 1e-6}
         
         # Special Tokens
         self.pad_token_id = pad_token_id
         
         # Model Behavior
         self.activation = activation
+
+        #Noise 
+        self.noise_type = noise_type
+        self.noise_prob = noise_prob
 
         # Validate window size
         assert window_size > 0, "Window size must be positive"
@@ -620,6 +630,78 @@ class Decoder(nn.Module):
         x = self.norm(x)
         return x, next_past_key_values if use_cache else None
 
+# 1. Fix inefficient noise application
+###############################################################################
+# add_noise_to_input
+###############################################################################
+def add_noise_to_input(
+    tokens: torch.Tensor,
+    noise_type="mask",
+    mask_token_id=4,
+    prob=0.3,
+    vocab_size=None,
+    pad_token_id=0
+) -> torch.Tensor:
+    """
+    Apply noise directly on GPU.
+
+    'delete' noise is re-padded per row, preserving batch dimensions:
+    - For each row in the batch, we randomly select tokens to keep
+    - We copy them to the front of the row
+    - The rest of the row is filled with pad_token_id
+    """
+    noisy_tokens = tokens.clone()
+    batch_size, seq_len = noisy_tokens.shape
+
+    if noise_type == "mask":
+        mask = torch.rand_like(noisy_tokens.float()) < prob
+        noisy_tokens = torch.where(
+            mask,
+            torch.tensor(mask_token_id, device=tokens.device),
+            noisy_tokens
+        )
+
+    elif noise_type == "delete":
+        # Randomly pick tokens to keep for each example in the batch
+        keep_mask = (torch.rand_like(noisy_tokens.float()) > prob)
+        
+        # We'll create a new tensor of the same shape, filled with pad_token_id
+        new_noisy = torch.full_like(noisy_tokens, pad_token_id)
+
+        # For each row in the batch, gather the kept tokens, then re-pad
+        for i in range(batch_size):
+            row = noisy_tokens[i]           # shape: [seq_len]
+            row_keep = keep_mask[i]         # shape: [seq_len]
+            row_kept = row[row_keep]        # shape: [variable_length]
+            length_to_copy = min(seq_len, row_kept.size(0))
+
+            # Copy the kept tokens into the front of the new row
+            new_noisy[i, :length_to_copy] = row_kept[:length_to_copy]
+            # Remaining positions stay as pad_token_id
+
+        noisy_tokens = new_noisy
+
+    elif noise_type == "permute":
+        perm = torch.rand(batch_size, seq_len, device=tokens.device).argsort(dim=1)
+        noisy_tokens = noisy_tokens.gather(1, perm)
+
+    elif noise_type == "substitute":
+        if vocab_size is None:
+            raise ValueError("Must provide vocab_size for 'substitute' noise.")
+        mask = torch.rand_like(noisy_tokens.float()) < prob
+        random_tokens = torch.randint(
+            low=0,
+            high=vocab_size,
+            size=noisy_tokens.shape,
+            device=noisy_tokens.device
+        )
+        noisy_tokens = torch.where(mask, random_tokens, noisy_tokens)
+
+    return noisy_tokens
+
+
+
+
 ###############################################################################
 # Full Encoder–Decoder Transformer with Advanced Training Features
 ###############################################################################
@@ -684,7 +766,7 @@ class Transformer(nn.Module):
             else:
                 # Initialize biases to 0
                 nn.init.zeros_(p)
-                
+
     def forward(
         self, 
         src: torch.Tensor,
@@ -695,7 +777,7 @@ class Transformer(nn.Module):
         use_cache: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Tuple]]:
         """
-        Enhanced forward pass with numerical stability checks.
+        Enhanced forward pass with denoising encoder and autoregressive decoder.
         """
         # ✅ Ensure `src` and `tgt` are Long Tensors before embedding
         if src.dtype != torch.long:
@@ -706,28 +788,38 @@ class Transformer(nn.Module):
             print(f"🚨 WARNING: Model received `tgt` with dtype {tgt.dtype}, forcing conversion to long.")
             tgt = tgt.to(torch.long)
 
-        # 1. Input validation
+        # ✅ Input validation
         if not src.isfinite().all():
             src = torch.nan_to_num(src)
             print("Warning: Non-finite values in source tokens")
         
-        # 2. Embedding with gradient scaling
-        with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", enabled=self.config.use_mixed_precision):
-            enc_inp = self.embedding(src)  # ✅ Now guaranteed to be Long Tensor
-            if not self.config.use_rope:
-                enc_inp = self.pos_encoding(enc_inp)
+        # ✅ Apply noise to encoder input (already returns a tensor on the same device)
+        src_noisy = add_noise_to_input(
+            src, 
+            noise_type=self.config.noise_type,  # e.g., "mask", "delete", "permute", etc.
+            mask_token_id=self.config.pad_token_id, 
+            prob=self.config.noise_prob  # Noise probability
+        )
+        
+        # ✅ Embedding with gradient scaling
+        with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu",
+                                enabled=self.config.use_mixed_precision):
+            enc_inp = self.embedding(src_noisy)  # Noisy input applied
             
-            # Add small noise to prevent degenerate embeddings
+            if not self.config.use_rope:
+                enc_inp = self.pos_encoding(enc_inp)  # Positional encoding applied
+            
+            # ✅ Add small noise to prevent degenerate embeddings
             if self.training:
                 enc_inp = enc_inp + torch.randn_like(enc_inp) * 1e-5
             
-            # 3. Monitor embedding values
+            # ✅ Monitor embedding values
             if not enc_inp.isfinite().all():
-                print(f"Warning: Non-finite values after embedding")
+                print("Warning: Non-finite values after embedding")
                 print(f"Embedding stats - mean: {enc_inp.mean():.4f}, std: {enc_inp.std():.4f}")
                 enc_inp = torch.nan_to_num(enc_inp, nan=0.0, posinf=1e4, neginf=-1e4)
             
-            # 4. Encoder forward pass
+            # ✅ Encoder forward pass
             encoder_past = None if past_key_values is None else past_key_values[0]
             encoder_output, enc_past = self.encoder(
                 enc_inp,
@@ -736,15 +828,16 @@ class Transformer(nn.Module):
                 use_cache=use_cache
             )
             
-            # 5. Monitor encoder output
+            # ✅ Monitor encoder output
             if not encoder_output.isfinite().all():
-                print(f"Warning: Non-finite values in encoder output")
+                print("Warning: Non-finite values in encoder output")
                 print(f"Encoder output stats - mean: {encoder_output.mean():.4f}, std: {encoder_output.std():.4f}")
                 encoder_output = torch.nan_to_num(encoder_output, nan=0.0, posinf=1e4, neginf=-1e4)
             
-            # 6. Decoder and output generation (if needed)
+            # ✅ Decoder and output generation (if needed)
             if tgt is not None:
                 dec_inp = self.embedding(tgt)  # ✅ Now guaranteed to be Long Tensor
+                
                 if not self.config.use_rope:
                     dec_inp = self.pos_encoding(dec_inp)
                 
@@ -758,12 +851,12 @@ class Transformer(nn.Module):
                     use_cache=use_cache
                 )
                 
-                # 7. Monitor decoder output
+                # ✅ Monitor decoder output
                 if not decoder_output.isfinite().all():
-                    print(f"Warning: Non-finite values in decoder output")
+                    print("Warning: Non-finite values in decoder output")
                     decoder_output = torch.nan_to_num(decoder_output, nan=0.0, posinf=1e4, neginf=-1e4)
                 
-                # 8. Generate logits with stable scaling
+                # ✅ Generate logits with stable scaling
                 logits = self.generator(decoder_output) / math.sqrt(self.config.d_model)
                 
                 if use_cache:
@@ -771,6 +864,7 @@ class Transformer(nn.Module):
                 return logits
             
             return encoder_output
+
 
 
     def configure_optimizer(self, config: TransformerConfig):
@@ -803,48 +897,41 @@ class Transformer(nn.Module):
         return optimizer
     
     def training_step(self, batch, optimizer) -> Dict[str, float]:
-            """Enhanced training step with gradient accumulation and stability checks."""
-            self.train()
-            metrics = {}
-            
-            with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", enabled=self.config.use_mixed_precision):
-                # Forward pass
-                outputs = self(
-                    src=batch['input_ids'],
-                    tgt=batch['labels'],
-                    src_mask=batch.get('attention_mask'),
-                    tgt_mask=self._generate_square_subsequent_mask(batch['labels'].size(1))
-                )
-                
-                # Compute primary loss
-                loss = self.compute_loss(outputs, batch['labels'])
-                metrics['loss'] = loss.item()
-                
-                # Add regularization
-                if self.config.use_regularization:
-                    reg_loss = self.compute_regularization()
-                    loss = loss + reg_loss
-                    metrics['reg_loss'] = reg_loss.item()
-            
-            # Gradient scaling and backward pass
-            self.scaler.scale(loss).backward()
-            
-            # Unscale before clipping
-            self.scaler.unscale_(optimizer)
-            
-            # Gradient clipping with norm monitoring
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.parameters(), 
-                self.config.max_grad_norm
+        self.train()
+        metrics = {}
+
+        with torch.amp.autocast(enabled=self.config.use_mixed_precision):
+            # -> pass the clean data directly
+            outputs = self(
+                src=batch['encoder_input_ids'],
+                tgt=batch['decoder_input_ids'],
+                attention_mask=batch.get('encoder_attention_mask'),
+                tgt_mask=batch.get('decoder_attention_mask')
             )
-            metrics['grad_norm'] = grad_norm.item()
-            
-            # Step with stability check
-            self.scaler.step(optimizer)
-            self.scaler.update()
-            optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
-            
-            return metrics
+            loss = self.compute_loss(outputs, batch['labels'])
+            metrics['loss'] = loss.item()
+
+            # (Optional) add regularization
+            if self.config.use_regularization:
+                reg_loss = self.compute_regularization()
+                loss = loss + reg_loss
+                metrics['reg_loss'] = reg_loss.item()
+
+        # Scale and backward
+        self.scaler.scale(loss).backward()
+
+        # Unscale for gradient clipping
+        self.scaler.unscale_(optimizer)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.parameters(), self.config.max_grad_norm
+        )
+        metrics['grad_norm'] = grad_norm.item()
+
+        self.scaler.step(optimizer)
+        self.scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+
+        return metrics
     
     def validation_step(self, batch) -> Dict[str, float]:
         """Validation step with metrics collection and error handling."""
@@ -906,62 +993,58 @@ class Transformer(nn.Module):
         return metrics
     
     def compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Enhanced loss computation with improved numerical stability."""
-        # Input validation
-        if not (outputs.isfinite().all() and labels.isfinite().all()):
-            outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1e4, neginf=-1e4)
-        
-        batch_size, seq_len, vocab_size = outputs.shape
-        
-        # Convert to float32 for better numerical stability
-        outputs = outputs.float()
-        
-        # Apply gradient scaling
-        outputs = outputs / math.sqrt(self.config.d_model)
-        
-        # Compute log probabilities with improved numerical stability
+        outputs = outputs.float() / math.sqrt(self.config.d_model)  # Stability scaling
         log_probs = F.log_softmax(outputs, dim=-1, dtype=torch.float32)
-        
-        # Get target distributions
+
         if self.config.label_smoothing > 0:
-            # Create smoothed target distribution
-            smooth_target = torch.full_like(log_probs, self.config.label_smoothing / (vocab_size - 1))
+            smooth_target = torch.full_like(log_probs, self.config.label_smoothing / (self.config.vocab_size - 1))
             smooth_target.scatter_(-1, labels.unsqueeze(-1), 1.0 - self.config.label_smoothing)
-            loss = -(smooth_target * log_probs).sum(dim=-1)
+
+            pad_mask = (labels != self.config.pad_token_id).float().unsqueeze(-1)
+            loss = -(smooth_target * log_probs * pad_mask).sum(dim=-1)
         else:
-            loss = F.nll_loss(log_probs.view(-1, vocab_size), 
-                             labels.view(-1),
-                             ignore_index=self.config.pad_token_id,
-                             reduction='none')
-            loss = loss.view(batch_size, seq_len)
-        
-        # Apply padding mask
+            loss = F.nll_loss(
+                log_probs.view(-1, self.config.vocab_size),
+                labels.view(-1),
+                ignore_index=self.config.pad_token_id,
+                reduction='none'
+            )
+
         pad_mask = (labels != self.config.pad_token_id).float()
-        loss = loss * pad_mask
-        
-        # Careful reduction
-        num_tokens = pad_mask.sum().clamp(min=1)
-        loss = loss.sum() / num_tokens
-        
-        return loss
+        return (loss * pad_mask).sum() / pad_mask.sum().clamp(min=1)
     
+##################################################################################
+# get_scheduler
+###############################################################################
+   
     @staticmethod
     def get_scheduler(optimizer, config: TransformerConfig, num_training_steps: int):
-        """Enhanced learning rate scheduler with warmup and min_lr support"""
+        """
+        Enhanced LR scheduler with warmup ratio, supporting:
+        - "cosine_warmup"
+        - "cosine_with_min_lr"
+        - "linear_warmup"
+        
+        If using "cosine_warmup", the minimum LR defaults to 0.0 unless overridden by config.lr_scheduler_kwargs.
+        If using "cosine_with_min_lr", config.lr_scheduler_kwargs["min_lr"] is typically set > 0.
+        """
         num_warmup_steps = int(num_training_steps * config.warmup_ratio)
+        
+        if config.scheduler_type in ["cosine_warmup", "cosine_with_min_lr"]:
+            # Decide default min_lr based on type
+            default_min_lr = 0.0 if config.scheduler_type == "cosine_warmup" else 1e-6
+            min_lr = config.lr_scheduler_kwargs.get("min_lr", default_min_lr)
+            
+            def lr_lambda(step):
+                if step < num_warmup_steps:
+                    # Linear warmup from 0 up to config.learning_rate
+                    return float(step) / float(max(1, num_warmup_steps))
+                else:
+                    # Cosine decay from config.learning_rate down to min_lr
+                    progress = float(step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+                    return min_lr + (config.learning_rate - min_lr) * 0.5 * (1.0 + np.cos(np.pi * progress))
 
-        if config.scheduler_type == "cosine_with_min_lr":
-            min_lr = config.lr_scheduler_kwargs.get("min_lr", 1e-6)  # Properly fetch min_lr
-
-            return LambdaLR(
-                optimizer,
-                lambda step: (
-                    step / max(1, num_warmup_steps)  # Warmup phase
-                    if step < num_warmup_steps else
-                    min_lr + (config.learning_rate - min_lr) * 
-                    (1 + np.cos(np.pi * (step - num_warmup_steps) / (num_training_steps - num_warmup_steps))) / 2
-                )
-            )
+            return LambdaLR(optimizer, lr_lambda)
 
         elif config.scheduler_type == "linear_warmup":
             return transformers.get_linear_schedule_with_warmup(
