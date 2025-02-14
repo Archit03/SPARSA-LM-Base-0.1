@@ -1,87 +1,71 @@
-training:
-  device: "cuda"
-  epochs: 5              
-  batch_size: 2  # Small batch size for VRAM stability
-  learning_rate: 2e-4  # Kept higher for faster convergence
-  weight_decay: 0.01     
-  max_grad_norm: 1.0     
-  gradient_accumulation_steps: 16  
-  seed: 42               
-  resume_from_checkpoint: null
-  checkpoint_dir: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/model"  # ✅ Correct model save path
-  checkpoint_save_frequency: 1
-  scheduler_type: "cosine_with_min_lr"  
-  lr_scheduler_kwargs:
-    min_lr: 1e-6  
-  warmup_ratio: 0.1                
-  log_every_n_steps: 100  
-  eval_every_n_epochs: 1
-  early_stopping_patience: 3
-  use_mixed_precision: true        
-  amp_scaler_init_scale: 8192  
-  use_gradient_checkpointing: false  
-  enable_gradient_accumulation: true  
-
-dataset:
-  train_dataset: "local_data"
-  max_seq_len: 64  
-  num_workers: 0  
-  shuffle: true
-  pin_memory: true  
-  prefetch_factor: 2  
-  persistent_workers: false  
-  preprocessing:
-    lowercase: true
-    min_length: 5
-  split:
-    test_size: 0.2
-    random_state: 42
-
-tokenizer:
-  path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer"
-  add_special_tokens: true
-
-model:
-  hidden_dim: 48  
-  num_layers: 2  
-  num_heads: 1  
-  ff_dim: 96  
-  dropout: 0.1  
-  vocab_size: 512  
-  max_seq_len: 64  
-  use_checkpointing: false  
-  activation: "gelu"  
-  tie_embeddings: true  
-  window_size: 2  
-  global_tokens: 0  
-  use_reentrant: false  
-
-inference:
-  model_path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/model/best_LuminaLM_model.pt"  # ✅ Correct model for inference
-
-logging:
-  log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: false
-  wandb_project: "LuminaLM_Base_Small"
-  wandb_entity: null
-  log_gradients: false  
-  log_model_weights: false  
-  log_train_steps: true
-  log_frequency: 500  
-  gradient_logging_frequency: 2000
-
-memory_monitor:
-  enabled: true
-  log_frequency: 10
-  monitor_gpu: true
-  monitor_cpu: true
-  empty_cache: true  
-
 generation:
-  max_length: 100
-  temperature: 0.7
-  top_k: 50
-  top_p: 0.9
+  max_length: 256
+  temperature: 0.1   # Lower temperature for more deterministic output
+  top_k: 30          # Reduce top-k for better control
+  top_p: 0.8         # Reduce top-p for better coherence
   repetition_penalty: 1.2
   do_sample: true
 
+inference:
+  model_path: model/best_LuminaLM_model.pt
+
+logging:
+  gradient_logging_frequency: 2000
+  log_dir: SPARSA-LM-Base 0.1/logs
+  log_frequency: 500
+  log_gradients: false
+  log_model_weights: false
+  log_train_steps: true
+  use_wandb: false
+  wandb_entity: null
+  wandb_project: LuminaLM_Base_Small
+
+memory_monitor:
+  empty_cache: true
+  enabled: true
+  log_frequency: 10
+  monitor_cpu: true
+  monitor_gpu: true
+
+model:
+  activation: gelu
+  dropout: 0.1
+  ff_dim: 384
+  global_tokens: 1
+  hidden_dim: 192
+  max_seq_len: 128
+  num_heads: 6
+  num_layers: 4
+  tie_embeddings: true
+  use_checkpointing: false
+  use_reentrant: false
+  vocab_size: 4096
+  window_size: 4
+
+tokenizer:
+  add_special_tokens: true
+  path: C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer
+
+training:
+  amp_scaler_init_scale: 8192
+  batch_size: 2
+  checkpoint_dir: C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/model
+  checkpoint_save_frequency: 1
+  device: cuda
+  early_stopping_patience: 3
+  enable_gradient_accumulation: true
+  epochs: 10
+  eval_every_n_epochs: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 2e-4
+  log_every_n_steps: 100
+  lr_scheduler_kwargs:
+    min_lr: 1e-6
+  max_grad_norm: 1.0
+  resume_from_checkpoint: null
+  scheduler_type: cosine_with_min_lr
+  seed: 42
+  use_gradient_checkpointing: false
+  use_mixed_precision: true
+  warmup_ratio: 0.1
+  weight_decay: 0.01

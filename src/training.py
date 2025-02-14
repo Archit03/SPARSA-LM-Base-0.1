@@ -302,7 +302,7 @@ class Trainer:
             self.scheduler = self._configure_scheduler(self.optimizer, self.config['training'], num_training_steps)
 
             # Loss Function
-            self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id, label_smoothing=0.05)
+            self.criterion = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id, label_smoothing=0.00)
 
             # Memory Monitor
             self.memory_monitor = MemoryMonitor()
@@ -490,7 +490,7 @@ class Trainer:
         """
         best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_model.pt')
         if os.path.exists(best_model_path):
-            checkpoint = torch.load(best_model_path, map_location=str(self.device))
+            checkpoint = torch.load(best_model_path, map_location=str(self.device), weights_only=True)
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])

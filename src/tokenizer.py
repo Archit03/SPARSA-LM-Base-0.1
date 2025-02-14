@@ -552,7 +552,7 @@ class MedicalTokenizer:
         min_frequency: int = 2,
         padding_strategy: str = 'longest',
         truncation_strategy: str = 'longest_first',
-        max_length: int = 128,
+        max_length: int = 256,
         normalize: bool = True
     ):
         # Initialize tokenizer with BPE model and special tokens

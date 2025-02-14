@@ -1,40 +1,40 @@
 training:
   device: "cuda"
-  epochs: 2                   # Minimal epochs for a quick sanity check
-  batch_size: 4               # Small batch size
-  learning_rate: 0.00003      # Lower LR to reduce risk of NaNs
+  epochs: 10
+  batch_size: 8                 # Can use larger batch with smaller model
+  learning_rate: 0.0002
   weight_decay: 0.1
-  max_grad_norm: 0.3
-  gradient_accumulation_steps: 1
+  max_grad_norm: 0.5
+  gradient_accumulation_steps: 4  # Reduced as model is smaller
   seed: 42
   resume_from_checkpoint: null
   checkpoint_dir: "checkpoints"
   checkpoint_save_frequency: 1
   scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs:
-    min_lr: 1e-6  
-  warmup_ratio: 0.1
-  log_every_n_steps: 10
+    min_lr: 1e-6
+  warmup_ratio: 0.05
+  log_every_n_steps: 50
   eval_every_n_epochs: 1
-  early_stopping_patience: 2
-  use_mixed_precision: false
-  amp_scaler_init_scale: 1024
-  use_gradient_checkpointing: false
-  enable_gradient_accumulation: false
+  early_stopping_patience: 3
+  use_mixed_precision: true
+  amp_scaler_init_scale: 256
+  use_gradient_checkpointing: false  # Not needed for smaller model
+  enable_gradient_accumulation: true
   max_grad_value: 5.0
-  use_noise_injection: false
+  use_noise_injection: true
 
 dataset:
   train_dataset: "local_data"
-  max_seq_len: 64
-  num_workers: 0
+  max_seq_len: 128             # Kept smaller for efficiency
+  num_workers: 2
   shuffle: true
   pin_memory: true
   prefetch_factor: 2
-  persistent_workers: false
+  persistent_workers: true
   preprocessing:
     lowercase: true
-    min_length: 5
+    min_length: 10
   split:
     test_size: 0.2
     random_state: 42
@@ -44,26 +44,26 @@ tokenizer:
   add_special_tokens: true
 
 model:
-  hidden_dim: 32
-  num_layers: 2
-  num_heads: 2
-  ff_dim: 64
-  dropout: 0.3     # Slightly less dropout than before
-  vocab_size: 8192
-  max_seq_len: 64
+  hidden_dim: 192              # Carefully sized for target params
+  num_layers: 4                # Reduced layers
+  num_heads: 6                 # Balanced heads
+  ff_dim: 384                 # 2x hidden_dim
+  dropout: 0.1
+  vocab_size: 4096            # Reduced vocab
+  max_seq_len: 128
   use_checkpointing: false
   activation: "gelu"
   tie_embeddings: true
-  window_size: 2
-  global_tokens: 0
+  window_size: 4
+  global_tokens: 1
   use_reentrant: false
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: false
+  use_wandb: true
   wandb_project: "LuminaLM_Base_Small"
   wandb_entity: null
-  log_gradients: false
+  log_gradients: true
   log_model_weights: false
   log_train_steps: true
   log_frequency: 1000
@@ -71,7 +71,7 @@ logging:
 
 memory_monitor:
   enabled: true
-  log_frequency: 10
+  log_frequency: 25
   monitor_gpu: true
   monitor_cpu: true
   empty_cache: true
