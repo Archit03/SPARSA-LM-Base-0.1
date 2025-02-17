@@ -1,8 +1,8 @@
 generation:
-  max_length: 256
-  temperature: 0.1   # Lower temperature for more deterministic output
-  top_k: 30          # Reduce top-k for better control
-  top_p: 0.8         # Reduce top-p for better coherence
+  max_length: 20
+  temperature: 0.9   # Increased temperature for more variability
+  top_k: 40          # Allow a slightly broader range of tokens
+  top_p: 0.95        # Include more of the probability mass
   repetition_penalty: 1.2
   do_sample: true
 

@@ -51,15 +51,10 @@ def add_noise_to_input(
     elif noise_type == "delete":
         # Remove tokens randomly, then re-pad to the original length
         kept = [t for t in noisy_tokens if random.random() > prob]
-        # Re-pad if we deleted some tokens
         new_length = len(kept)
-        # If everything got deleted, we keep an empty list
-        # Now re-pad
         if new_length < original_length:
-            # Copy the kept tokens to the front
             noisy_tokens = kept + [pad_token_id] * (original_length - new_length)
         else:
-            # If nothing was deleted, we just keep them
             noisy_tokens = kept
 
     elif noise_type == "permute":
@@ -70,8 +65,6 @@ def add_noise_to_input(
             noisy_tokens[i], noisy_tokens[j] = noisy_tokens[j], noisy_tokens[i]
 
     elif noise_type == "substitute":
-        # Randomly replace tokens with random IDs up to the local max
-        # If you want a full vocab-based substitution, pass in a vocab_size param.
         max_id = max(noisy_tokens) if noisy_tokens else 0
         for i in range(original_length):
             if random.random() < prob and max_id > 0:
@@ -144,7 +137,7 @@ class DatasetProcessor:
 
 
 # ----------------------------------------------------------------------
-# Text Dataset Class with Noisy Encoder
+# Text Dataset Class without noise injection in __getitem__
 # ----------------------------------------------------------------------
 class TextDataset(Dataset):
     def __init__(self, data: List[str], tokenizer: Any, max_length: int):
@@ -178,28 +171,18 @@ class TextDataset(Dataset):
         input_ids = encoding["input_ids"].squeeze(0)       # shape: [max_length]
         attention_mask = encoding["attention_mask"].squeeze(0)  # shape: [max_length]
 
-        # 2) Apply noise to encoder input
-        #    - If you want to use the real [MASK] token, pass mask_token_id=self.mask_id
-        #    - If you want to do "delete" noise, it will re-pad to the same length with self.pad_id
-        noisy_input_ids = add_noise_to_input(
-            tokens=input_ids.tolist(), 
-            noise_type="mask",   # or "delete", "permute", "substitute"
-            mask_token_id=self.mask_id,  # Using [MASK] ID instead of [PAD]
-            prob=0.3,
-            pad_token_id=self.pad_id
-        )
-        noisy_input_ids = torch.tensor(noisy_input_ids, dtype=torch.long)
+        # 2) Use the clean input for the encoder.
+        # Noise injection is removed here; it can be applied in the model if needed.
+        encoder_input_ids = input_ids
 
         # 3) Shift decoder input for autoregressive learning
         decoder_input_ids = torch.full((self.max_length,), self.pad_id, dtype=torch.long)
         decoder_input_ids[0] = self.bos_id  # Start with BOS token
-        # Shift left by one for the rest
         decoder_input_ids[1:len(input_ids)] = input_ids[:-1]
-
         decoder_attention_mask = (decoder_input_ids != self.pad_id).long()
 
         return {
-            "encoder_input_ids": noisy_input_ids,       # Noisy input for encoder
+            "encoder_input_ids": encoder_input_ids,  # Clean input; no noise here
             "encoder_attention_mask": attention_mask,
             "decoder_input_ids": decoder_input_ids,
             "decoder_attention_mask": decoder_attention_mask,

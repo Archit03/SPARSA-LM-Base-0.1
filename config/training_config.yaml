@@ -1,8 +1,8 @@
 training:
   device: "cuda"
-  epochs: 10
+  epochs: 20
   batch_size: 8                 # Can use larger batch with smaller model
-  learning_rate: 0.0002
+  learning_rate: 0.0003
   weight_decay: 0.1
   max_grad_norm: 0.5
   gradient_accumulation_steps: 4  # Reduced as model is smaller
@@ -22,7 +22,7 @@ training:
   use_gradient_checkpointing: false  # Not needed for smaller model
   enable_gradient_accumulation: true
   max_grad_value: 5.0
-  use_noise_injection: true
+  use_noise_injection: false
 
 dataset:
   train_dataset: "local_data"
