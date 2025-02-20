@@ -1,6 +1,6 @@
 training:
   device: "cuda"
-  epochs: 20
+  epochs: 30
   batch_size: 8                 # Can use larger batch with smaller model
   learning_rate: 0.0003
   weight_decay: 0.1
@@ -22,7 +22,9 @@ training:
   use_gradient_checkpointing: false  # Not needed for smaller model
   enable_gradient_accumulation: true
   max_grad_value: 5.0
-  use_noise_injection: false
+  use_noise_injection: true         # Enable noise injection for encoder inputs
+  noise_type: "mask"                # Type of noise to apply (e.g., "mask")
+  noise_prob: 0.3                   # Probability of noise injection
 
 dataset:
   train_dataset: "local_data"
@@ -49,9 +51,9 @@ model:
   num_heads: 6                 # Balanced heads
   ff_dim: 384                 # 2x hidden_dim
   dropout: 0.1
-  vocab_size: 4096            # Reduced vocab
+  vocab_size: 8000            # Increased vocab
   max_seq_len: 128
-  use_checkpointing: false
+  use_checkpointing: true
   activation: "gelu"
   tie_embeddings: true
   window_size: 4
@@ -60,7 +62,7 @@ model:
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: true
+  use_wandb: false
   wandb_project: "LuminaLM_Base_Small"
   wandb_entity: null
   log_gradients: true

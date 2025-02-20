@@ -1,8 +1,8 @@
 generation:
   max_length: 20
-  temperature: 0.9   # Increased temperature for more variability
-  top_k: 40          # Allow a slightly broader range of tokens
-  top_p: 0.95        # Include more of the probability mass
+  temperature: 1.0   # Lowered temperature for more focused, coherent output
+  top_k: 50          # Restricted to the top 50 tokens for sampling
+  top_p: 0.9         # Nucleus sampling to cover 90% of the probability mass
   repetition_penalty: 1.2
   do_sample: true
 
@@ -39,7 +39,7 @@ model:
   tie_embeddings: true
   use_checkpointing: false
   use_reentrant: false
-  vocab_size: 4096
+  vocab_size: 8000
   window_size: 4
 
 tokenizer:

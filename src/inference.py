@@ -97,7 +97,7 @@ def generate_text(
 ) -> str:
     """
     Generate text with a token-by-token loop.
-    NOTE: If your model supports 'past_key_values', you can re-use them for speed.
+    NOTE: This version does not inject any noise during inference.
     """
     # 3.1. Load defaults from config if not given
     gen_cfg = config.get('generation', {})
@@ -112,24 +112,29 @@ def generate_text(
     if not prompt.startswith(tokenizer.bos_token):
         prompt = f"{tokenizer.bos_token} {prompt}".strip()
 
+    # If prompt ends with EOS, remove it to allow generation
+    if prompt.endswith(tokenizer.eos_token):
+        print("Prompt already contains EOS token at the end, removing it to allow generation.")
+        prompt = prompt[:-len(tokenizer.eos_token)].strip()
+
     # 3.2. Encode prompt
     input_ids = tokenizer.encode(
         prompt,
         return_tensors="pt",
         add_special_tokens=True,
-        padding=False,  # We only have one prompt here
+        padding=False  # We only have one prompt here
     ).to(device)
 
     # Trim if exceeds model's max_seq_len
-    model_max_len = config['model'].get('max_seq_len', 512)
+    model_max_len = config['model'].get('max_seq_len', 128)
     if input_ids.size(1) > model_max_len:
         input_ids = input_ids[:, -model_max_len:]
 
+    # Record the length of the prompt tokens so we can return only the generated part
+    prompt_length = input_ids.size(1)
+
     # We'll store all generated tokens in this list
     generated_ids = input_ids[0].tolist()
-
-    # # If your model supports caching, you can do something like:
-    # past = None
 
     # 3.3. Token-by-token generation
     with inference_mode():
@@ -138,38 +143,27 @@ def generate_text(
             curr_ids = generated_ids[-model_max_len:]
             curr_input = torch.tensor([curr_ids], device=device)
 
-            # # If using cached KV:
-            # outputs = model(curr_input, past_key_values=past)
-            # logits = outputs[0][:, -1, :]
-            # past = outputs[1]
-
             outputs = model(curr_input)
-            # We assume the shape is [batch, seq_len, vocab_size]
+            # Assume the shape is [batch, seq_len, vocab_size]
             logits = outputs[:, -1, :]
 
             # 3.4. Apply temperature
             if temperature > 0:
                 logits = logits / temperature
 
-            # 3.5. top-k filtering
+            # 3.5. Top-k filtering
             if top_k > 0:
                 top_k = min(top_k, logits.size(-1))
-                # Get the top k indices, everything else is -inf
                 vals, idx = torch.topk(logits, top_k)
-                # Create a mask of which indices to keep
                 keep_mask = torch.zeros_like(logits, dtype=torch.bool).scatter_(1, idx, True)
                 logits[~keep_mask] = float('-inf')
 
-            # 3.6. top-p (nucleus) filtering
+            # 3.6. Top-p (nucleus) filtering
             if top_p > 0.0 and top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-
-                # Remove tokens with cumulative prob above the threshold
                 sorted_indices_to_remove = cumulative_probs > top_p
-                # Shift tokens to keep the first token above the threshold
-                sorted_indices_to_remove[:, 0] = False
-
+                sorted_indices_to_remove[:, 0] = False  # Always keep the first token
                 for row_i, row in enumerate(sorted_indices_to_remove):
                     remove_idx = sorted_indices[row_i, row]
                     logits[row_i, remove_idx] = float('-inf')
@@ -178,15 +172,14 @@ def generate_text(
             probs = torch.softmax(logits, dim=-1)
             next_token_id = torch.multinomial(probs, 1).item()
 
-            # Stop if EOS token
+            # Stop if EOS token is generated
             if next_token_id == tokenizer.eos_token_id:
                 break
 
             generated_ids.append(next_token_id)
 
-    # 3.8. Decode the result
-    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-    # Minimal cleanup
+    # 3.8. Decode only the generated portion (after the prompt)
+    generated_text = tokenizer.decode(generated_ids[prompt_length:], skip_special_tokens=True)
     generated_text = generated_text.strip()
 
     return generated_text
@@ -203,10 +196,6 @@ def main():
         tokenizer = load_tokenizer(config['tokenizer']['path'])
         model = setup_model_for_inference(config)
 
-        # Optional: read generation config from YAML
-        gen_cfg = config.get('generation', {})
-        default_max_len = gen_cfg.get('max_length', 50)
-
         print("\n🔥 Welcome to LuminaLM Text Generation! 🔥")
         print("Type your prompt and press Enter to generate text.")
         print("Type 'exit' to quit.\n")
@@ -217,18 +206,12 @@ def main():
                 print("\n👋 Goodbye!")
                 break
 
-            # Generate
             try:
                 output = generate_text(
                     model=model,
                     tokenizer=tokenizer,
                     prompt=prompt,
                     config=config
-                    # If you'd like, pass explicit overrides:
-                    # max_length=60,
-                    # temperature=0.7,
-                    # top_k=40,
-                    # top_p=0.9
                 )
                 print(f"\n📝 Generated Output:\n{'-'*50}")
                 print(output)

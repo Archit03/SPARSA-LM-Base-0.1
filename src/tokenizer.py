@@ -555,23 +555,33 @@ class MedicalTokenizer:
         max_length: int = 128,
         normalize: bool = True
     ):
-        # Initialize tokenizer with BPE model and special tokens
+        # Initialize tokenizer with a BPE model and specify UNK token
         self.tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
         
-        # Set up pre-tokenizer first
+        # Set up the ByteLevel pre-tokenizer
         self.tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
         
-        # Add special tokens to the tokenizer's model
-        special_tokens = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "[BOS]", "[EOS]"]
-        for token in special_tokens:
-            _ = self.tokenizer.token_to_id(token)
+        # Define the special tokens mapping explicitly
+        special_tokens_map = {
+            "pad_token": "[PAD]",
+            "unk_token": "[UNK]",
+            "cls_token": "[CLS]",
+            "sep_token": "[SEP]",
+            "mask_token": "[MASK]",
+            "bos_token": "[BOS]",
+            "eos_token": "[EOS]"
+        }
+        self.special_tokens = special_tokens_map
         
+        # If the tokenizer's special tokens map is empty, add the special tokens
+        if not self.tokenizer.special_tokens_map or len(self.tokenizer.special_tokens_map) == 0:
+            self.tokenizer.add_special_tokens(special_tokens_map)
         
-        # Configure padding and truncation
+        # Configure padding and truncation settings
         self.padding_config = {
             'strategy': padding_strategy,
-            'pad_token': "[PAD]",
-            'pad_token_id': 0,
+            'pad_token': special_tokens_map["pad_token"],
+            'pad_token_id': 0,  # Assuming [PAD] is assigned ID 0
             'pad_to_multiple_of': 8
         }
         
@@ -582,33 +592,21 @@ class MedicalTokenizer:
             'direction': 'right'
         }
         
-        # Special tokens configuration
-        self.special_tokens = {
-            'pad_token': "[PAD]",
-            'unk_token': "[UNK]",
-            'cls_token': "[CLS]",
-            'sep_token': "[SEP]",
-            'mask_token': "[MASK]",
-            'bos_token': "[BOS]",
-            'eos_token': "[EOS]"
-        }
-                
         # Normalization configuration
         self.normalize = normalize
-        if normalize:
+        if self.normalize:
             self.normalizer = self._setup_normalizer()
             self.tokenizer.normalizer = self.normalizer
         
-        # Dynamic vocabulary sizing
+        # Dynamic vocabulary sizing (placeholder implementation)
         self.initial_vocab_size = vocab_size
         self.min_frequency = min_frequency
         self.vocab_size = self._calculate_dynamic_vocab_size()
         
-        # Configure tokenizer components
+        # Configure additional tokenizer components (e.g. post-processor)
         self._setup_tokenizer()
-
+    
     def _setup_normalizer(self):
-        """Setup text normalization rules."""
         from tokenizers import normalizers
         return normalizers.Sequence([
             normalizers.NFKC(),  # Unicode normalization
@@ -617,73 +615,72 @@ class MedicalTokenizer:
             normalizers.Replace(r'(?<=\d)[,.](?=\d{3})', ''),  # Handle numbers
             normalizers.Lowercase(),  # Convert to lowercase
             # Medical-specific normalizations
-            normalizers.Replace(r'\b(?:mg/dl|mg/dL)\b', 'mg/dL'),  # Standardize units
+            normalizers.Replace(r'\b(?:mg/dl|mg/dL)\b', 'mg/dL'),
             normalizers.Replace(r'\b(?:mcg|µg|ug)/(?:ml|mL)\b', 'μg/mL'),
             normalizers.Replace(r'\b(?:ng)/(?:ml|mL)\b', 'ng/mL')
         ])
-
+    
     def _setup_tokenizer(self):
-        """Configure tokenizer components."""
-        # Set pre-tokenizer
+        # Re-set the pre-tokenizer (ByteLevel with add_prefix_space)
         self.tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
         
         # Set normalizer if enabled
         if self.normalize:
             self.tokenizer.normalizer = self.normalizer
         
-        # Configure post-processor for special token handling
+        # Configure post-processor for handling special tokens in outputs
         from tokenizers.processors import TemplateProcessing
-        
         try:
-            # Create special tokens as a list of tuples (token, id)
-            special_tokens = [
-                (self.special_tokens['cls_token'], 0),  # CLS token with ID 0
-                (self.special_tokens['sep_token'], 1),  # SEP token with ID 1
+            # Retrieve the actual token IDs from the tokenizer for special tokens
+            cls_id = self.tokenizer.token_to_id(self.special_tokens['cls_token'])
+            sep_id = self.tokenizer.token_to_id(self.special_tokens['sep_token'])
+            special_tokens_tuples = [
+                (self.special_tokens['cls_token'], cls_id),
+                (self.special_tokens['sep_token'], sep_id)
             ]
-            
             self.tokenizer.post_processor = TemplateProcessing(
                 single=f"$A {self.special_tokens['sep_token']}",
                 pair=f"{self.special_tokens['cls_token']} $A {self.special_tokens['sep_token']} $B {self.special_tokens['sep_token']}",
-                special_tokens=special_tokens  # Pass as sequence of tuples
+                special_tokens=special_tokens_tuples
             )
         except Exception as e:
             logging.error(f"Failed to set up post-processor: {str(e)}")
-            # Fallback to simpler configuration if needed
             self.tokenizer.post_processor = TemplateProcessing(
                 single="$A",
                 pair="$A $B",
-                special_tokens=[]  # Empty sequence for fallback
+                special_tokens=[]
             )
-
+    
+    def _calculate_dynamic_vocab_size(self) -> int:
+        # Return provided vocab_size or default to 4000 if not specified
+        return self.initial_vocab_size if self.initial_vocab_size is not None else 4000
+    
     def _analyze_dataset_vocabulary(self) -> int:
-        """Analyze dataset to count unique tokens."""
         if not hasattr(self.tokenizer, 'pre_tokenizer') or self.tokenizer.pre_tokenizer is None:
             logging.error("Pre-tokenizer not initialized")
             return 0
-        
         unique_tokens = set()
         sample_size = 100000  # Limit analysis to first 100K tokens
-        
         try:
-            # Sample text for analysis
-            sample_text = "John was admitted to the emergency room after experiencing severe headaches and blurred vision. The physician ordered a CT scan to rule out intracranial hemorrhage. Meanwhile, artificial intelligence tools in radiology have improved diagnostic accuracy significantly. In other news, OpenAI has released a state-of-the-art language model capable of generating coherent and contextually aware text."
+            sample_text = (
+                "John was admitted to the emergency room after experiencing severe headaches and blurred vision. "
+                "The physician ordered a CT scan to rule out intracranial hemorrhage. "
+                "Meanwhile, artificial intelligence tools in radiology have improved diagnostic accuracy significantly. "
+                "In other news, OpenAI has released a state-of-the-art language model capable of generating coherent and contextually aware text."
+            )
             tokens = self.tokenizer.pre_tokenizer.pre_tokenize_str(sample_text)
-            
             for token, _ in tokens:
                 unique_tokens.add(token)
                 if len(unique_tokens) >= sample_size:
                     break
-            
             return len(unique_tokens)
-            
         except Exception as e:
             logging.warning(f"Vocabulary analysis failed: {str(e)}")
             return 0
-
+    
     def train(self, files: List[str], save_path: str):
-        """Train tokenizer with dynamic configuration."""
+        from tokenizers.trainers import BpeTrainer
         try:
-            # Configure trainer with current settings
             trainer = BpeTrainer(
                 vocab_size=self.vocab_size,
                 min_frequency=self.min_frequency,
@@ -691,8 +688,6 @@ class MedicalTokenizer:
                 initial_alphabet=ByteLevel.alphabet(),
                 show_progress=True
             )
-            
-            # Train tokenizer
             self.tokenizer.train(files=files, trainer=trainer)
             
             # Save configuration along with tokenizer
@@ -704,8 +699,6 @@ class MedicalTokenizer:
                 'special_tokens': self.special_tokens,
                 'normalize': self.normalize
             }
-            
-            # Save tokenizer and config
             self.tokenizer.save(save_path)
             with open(f"{save_path}.config", 'w') as f:
                 json.dump(config, f, indent=2)
@@ -713,7 +706,7 @@ class MedicalTokenizer:
         except Exception as e:
             logging.error(f"Training failed: {e}")
             raise
-
+    
     def encode(
         self,
         texts: Union[str, List[str]],
@@ -721,45 +714,31 @@ class MedicalTokenizer:
         truncation: bool = True,
         max_length: Optional[int] = 128,
         return_tensors: bool = True
-    ) -> Dict[str, Union[List[int], Tensor]]:
-        """Enhanced encoding with configurable padding and truncation."""
+    ) -> dict:
         if isinstance(texts, str):
             texts = [texts]
-            
-        # Apply encoding with current configuration
         encodings = self.tokenizer.encode_batch(texts)
-        
-        # Handle padding if requested
         if padding:
             max_len = max(len(enc.ids) for enc in encodings)
             if max_length:
                 max_len = min(max_len, max_length)
-                
             for enc in encodings:
                 padding_length = max_len - len(enc.ids)
                 if padding_length > 0:
                     enc.ids.extend([self.padding_config['pad_token_id']] * padding_length)
                     enc.attention_mask.extend([0] * padding_length)
-                    
-        # Handle truncation if requested
         if truncation and max_length:
             for enc in encodings:
                 if len(enc.ids) > max_length:
                     enc.ids = enc.ids[:max_length]
                     enc.attention_mask = enc.attention_mask[:max_length]
-                    
-        # Prepare output
         output = {
             'input_ids': [enc.ids for enc in encodings],
             'attention_mask': [enc.attention_mask for enc in encodings]
         }
-        
-        # Convert to tensors if requested
         if return_tensors:
             output = {k: torch.tensor(v) for k, v in output.items()}
-            
         return output
-
 
 ###############################################################################
 # File Validator
