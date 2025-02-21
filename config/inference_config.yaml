@@ -8,6 +8,7 @@ generation:
 
 inference:
   model_path: model/best_LuminaLM_model.pt
+  seed: 42
 
 logging:
   gradient_logging_frequency: 2000
@@ -28,19 +29,19 @@ memory_monitor:
   monitor_gpu: true
 
 model:
-  activation: gelu
+  hidden_dim: 128                   # Reduced for quick training
+  num_layers: 2                      # Fewer layers for speed
+  num_heads: 4                      # Reduced to balance
+  ff_dim: 256                        # 2x hidden_dim
   dropout: 0.1
-  ff_dim: 384
-  global_tokens: 1
-  hidden_dim: 192
-  max_seq_len: 128
-  num_heads: 6
-  num_layers: 4
-  tie_embeddings: true
-  use_checkpointing: false
-  use_reentrant: false
   vocab_size: 8000
+  max_seq_len: 64
+  use_checkpointing: true
+  activation: "gelu"
+  tie_embeddings: true
   window_size: 4
+  global_tokens: 1
+  use_reentrant: false
 
 tokenizer:
   add_special_tokens: true

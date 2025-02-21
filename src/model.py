@@ -1,4 +1,5 @@
 import math
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -119,11 +120,12 @@ class TransformerConfig:
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.use_reentrant = use_reentrant
 
-###############################################################################
+########################################################################################
 # Core Components - Positional Encodings
-###############################################################################
+########################################################################################
+
 class RotaryPositionalEmbedding(nn.Module):
-    """Rotary positional embedding for enhanced position encoding."""
+    """Rotary positional embedding with caching and vectorized computation."""
     def __init__(self, dim: int, max_seq_len: int = 4096):
         super().__init__()
         inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
@@ -134,24 +136,26 @@ class RotaryPositionalEmbedding(nn.Module):
         self.sin_cached = None
 
     def forward(self, x: torch.Tensor, seq_len: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        if seq_len is None:
+            seq_len = x.size(1)
         if seq_len > self.max_seq_len:
             raise ValueError(f"Sequence length {seq_len} exceeds maximum allowed length {self.max_seq_len}")
-        
         if seq_len > self.seq_len_cached:
             self.seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
-            freqs = torch.einsum('i,j->ij', t, self.inv_freq)
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            self.cos_cached = emb.cos()[None, None, :, :]
-            self.sin_cached = emb.sin()[None, None, :, :]
+            t = torch.arange(seq_len, device=x.device).unsqueeze(1)  # shape: [seq_len, 1]
+            # Use broadcasting to compute frequencies without explicit loops
+            freqs = t * self.inv_freq.unsqueeze(0)  # shape: [seq_len, dim/2]
+            emb = torch.cat((freqs, freqs), dim=-1)   # shape: [seq_len, dim]
+            emb = emb.unsqueeze(0).unsqueeze(0)  # shape: [1, 1, seq_len, dim]
+            self.cos_cached = emb.cos()
+            self.sin_cached = emb.sin()
         return self.cos_cached[:, :, :seq_len, :], self.sin_cached[:, :, :seq_len, :]
 
 class PositionalEncoding(nn.Module):
-    """Standard sinusoidal positional encoding."""
+    """Standard sinusoidal positional encoding with dropout."""
     def __init__(self, d_model: int, max_len: int = 4096, dropout: float = 0.1):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-        
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model))
@@ -164,12 +168,14 @@ class PositionalEncoding(nn.Module):
         seq_len = x.size(1)
         return self.dropout(x + self.pe[:, :seq_len])
 
-###############################################################################
+########################################################################################
 # Sparse Multi-Head Attention with Optional KV Caching
-###############################################################################
+########################################################################################
+
 class SparseMultiHeadAttention(nn.Module):
     """
     Multi-Head Attention with Sparse Local Windowing and Optional Global Tokens.
+    Minor improvement: vectorized mask building can be implemented in future.
     """
     def __init__(self, config, is_causal=False):
         super().__init__()
@@ -192,20 +198,20 @@ class SparseMultiHeadAttention(nn.Module):
             nn.init.xavier_uniform_(layer.weight, gain=1.0 / math.sqrt(self.d_k))
             nn.init.zeros_(layer.bias)
 
-    def build_local_window_mask(self, seq_len, device):
+    def build_local_window_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        # Minor tweak: a more vectorized approach can replace this loop in the future.
         mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device=device)
         for i in range(seq_len):
             start = max(0, i - self.window_size)
             end = min(seq_len, i + self.window_size + 1)
             mask[i, start:end] = 1
         if self.global_tokens > 0:
-            mask[: self.global_tokens, :] = 1
-            mask[:, : self.global_tokens] = 1
+            mask[:self.global_tokens, :] = 1
+            mask[:, :self.global_tokens] = 1
         return mask
-    
+
     def forward(self, query, key, value, attn_mask=None, past_key_value=None, use_cache=False):
         batch_size, new_seq_len, _ = query.size()
-
         Q = self.query(query).view(batch_size, new_seq_len, self.num_heads, self.d_k).transpose(1, 2)
         K = self.key(key).view(batch_size, new_seq_len, self.num_heads, self.d_k).transpose(1, 2)
         V = self.value(value).view(batch_size, new_seq_len, self.num_heads, self.d_k).transpose(1, 2)
@@ -221,7 +227,6 @@ class SparseMultiHeadAttention(nn.Module):
         next_key_value = (K, V) if use_cache else None
         total_seq_len = K.size(2)
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
-
         local_mask = self.build_local_window_mask(total_seq_len, device=query.device)
         start = total_seq_len - new_seq_len
         local_mask_slice = local_mask[start:start+new_seq_len, :]
@@ -239,9 +244,10 @@ class SparseMultiHeadAttention(nn.Module):
         output = self.output(output)
         return output, next_key_value
 
-###############################################################################
-# Local Window Mask with Optional Global Tokens
-###############################################################################
+########################################################################################
+# Local Window Mask with Optional Global Tokens (Alternate Implementation)
+########################################################################################
+
 def build_local_window_mask(seq_len: int, window_size: int, global_tokens: int = 0, is_causal: bool = False, device: Optional[torch.device] = None) -> torch.Tensor:
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -256,13 +262,13 @@ def build_local_window_mask(seq_len: int, window_size: int, global_tokens: int =
                 mask[i, j] = float('-inf')
     return mask
 
-###############################################################################
+########################################################################################
 # Residual + LayerNorm with Optional Gradient Checkpointing
-###############################################################################
+########################################################################################
+
 class ResidualConnection(nn.Module):
     """
-    y = x + dropout(sublayer(LN(x)))
-    If gradient checkpointing is enabled, wraps the sublayer call in checkpoint().
+    Implements y = x + dropout(sublayer(LN(x))) with additional error checking.
     """
     def __init__(self, d_model, dropout=0.1, use_checkpointing=False, use_reentrant=False, layer_norm_eps=1e-5):
         super().__init__()
@@ -276,7 +282,7 @@ class ResidualConnection(nn.Module):
             return sublayer(normed_x)
         
         if not x.isfinite().all():
-            print("Warning: Non-finite values in residual input")
+            logging.warning("Non-finite values in residual input; replacing with numerical safe values.")
             x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
         
         normed = self.norm(x)
@@ -286,18 +292,19 @@ class ResidualConnection(nn.Module):
             sublayer_output = sublayer(normed)
         
         if not sublayer_output.isfinite().all():
-            print("Warning: Non-finite values in sublayer output")
+            logging.warning("Non-finite values in sublayer output; replacing with numerical safe values.")
             sublayer_output = torch.nan_to_num(sublayer_output, nan=0.0, posinf=1e4, neginf=-1e4)
         
         out = x + self.dropout(sublayer_output)
         if not out.isfinite().all():
-            print("Warning: Non-finite values in residual output")
+            logging.warning("Non-finite values in residual output; replacing with numerical safe values.")
             out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
         return out
 
-###############################################################################
+########################################################################################
 # Feed Forward
-###############################################################################
+########################################################################################
+
 class FeedForward(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
@@ -317,9 +324,10 @@ class FeedForward(nn.Module):
         x = self.linear2(x)
         return x
 
-###############################################################################
-# Encoder Block with Sparse Attention + Global Option + Checkpointing
-###############################################################################
+########################################################################################
+# Encoder Block with Sparse Attention, Global Tokens, and Checkpointing
+########################################################################################
+
 class EncoderBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -339,9 +347,10 @@ class EncoderBlock(nn.Module):
         x = self.ff_res(x, self.feed_forward)
         return x, next_kv
 
-###############################################################################
-# Decoder Block with Sparse Self-Attn + Cross-Attn + Checkpointing + Cache
-###############################################################################
+########################################################################################
+# Decoder Block with Sparse Self-Attention, Cross-Attention, Checkpointing, and Cache
+########################################################################################
+
 class DecoderBlock(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
@@ -390,9 +399,10 @@ class DecoderBlock(nn.Module):
             )
         return x, next_key_value
 
-###############################################################################
+########################################################################################
 # Full Encoder
-###############################################################################
+########################################################################################
+
 class Encoder(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
@@ -417,9 +427,10 @@ class Encoder(nn.Module):
         x = self.norm(x)
         return x, next_past_key_values if use_cache else None
 
-###############################################################################
+########################################################################################
 # Full Decoder
-###############################################################################
+########################################################################################
+
 class Decoder(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
@@ -449,9 +460,10 @@ class Decoder(nn.Module):
         x = self.norm(x)
         return x, next_past_key_values if use_cache else None
 
-###############################################################################
+########################################################################################
 # Noise Injection Function
-###############################################################################
+########################################################################################
+
 def add_noise_to_input(tokens: torch.Tensor, noise_type="mask", mask_token_id=4, prob=0.0, vocab_size=None, pad_token_id=0) -> torch.Tensor:
     """
     Apply noise directly on GPU.
@@ -484,9 +496,10 @@ def add_noise_to_input(tokens: torch.Tensor, noise_type="mask", mask_token_id=4,
         noisy_tokens = torch.where(mask, random_tokens, noisy_tokens)
     return noisy_tokens
 
-###############################################################################
+########################################################################################
 # Full Encoder–Decoder Transformer Model
-###############################################################################
+########################################################################################
+
 class Transformer(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()

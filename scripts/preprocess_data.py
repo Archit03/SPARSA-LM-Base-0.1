@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import gc
 import re
 import sys
@@ -25,104 +26,61 @@ if torch.cuda.is_available():
 else:
     BATCH_SIZE = 1  # CPU mode
 
-
 class MLTextConfig:
     """
     Configuration for text preprocessing.
-
-    This configuration class holds various options for processing text,
-    including removal flags for HTML, ads, metadata, URLs, emails, and code snippets.
-
-    **Attributes:**
     
-    - ``batch_size (int)``: Batch size for processing text.
-    - ``do_lowercase (bool)``: Whether to convert text to lowercase.
-    - ``min_text_length (int)``: Minimum allowed text length.
-    - ``remove_non_english (bool)``: Remove non-English text.
-    - ``remove_japanese (bool)``: Remove Japanese text.
-    - ``remove_duplicates (bool)``: Whether to remove duplicate content.
-    - ``remove_html (bool)``: Remove HTML markup.
-    - ``remove_ads (bool)``: Remove advertisements.
-    - ``remove_boilerplate (bool)``: Remove boilerplate text.
-    - ``remove_metadata (bool)``: Remove metadata.
-    - ``remove_code_snippets (bool)``: Remove code snippets.
-    - ``remove_urls (bool)``: Remove URLs.
-    - ``remove_emails (bool)``: Remove email addresses.
-    - ``keep_lists_and_bullets (bool)``: Preserve lists and bullet formatting.
-    - ``remove_special_chars (bool)``: Remove special characters.
+    Options include:
+      - Removing HTML markup, URLs, emails, and code snippets.
+      - Converting text to lowercase if desired.
+      - Removing all non-English characters (i.e. non-ASCII).
+      - Normalizing text using Unicode NFKC.
     """
     def __init__(self) -> None:
         self.batch_size: int = BATCH_SIZE
-        self.do_lowercase: bool = False  # Preserve case for now
-        self.min_text_length: int = 5  # Keep shorter texts if needed
-        self.remove_non_english: bool = True
-        self.remove_japanese: bool = True
-        self.remove_duplicates: bool = False  # Retain meaningful repetitions
-        self.remove_html: bool = True
-        self.remove_ads: bool = True
-        self.remove_boilerplate: bool = True
-        self.remove_metadata: bool = True
-        self.remove_code_snippets: bool = True
-        self.remove_urls: bool = True  # Remove URLs
-        self.remove_emails: bool = True  # Remove Emails
-        self.keep_lists_and_bullets: bool = True  # Preserve structured text
-        self.remove_special_chars: bool = False  # Retain special formatting
-
+        self.do_lowercase: bool = False          # Set to True to force lowercase conversion
+        self.min_text_length: int = 5             # Minimum allowed text length
+        self.remove_html: bool = True             # Remove HTML markup
+        self.remove_urls: bool = True             # Remove URLs
+        self.remove_emails: bool = True           # Remove email addresses
+        self.remove_code_snippets: bool = True    # Remove inline and block code
+        self.remove_non_english: bool = True      # Remove all non-English characters (non-ASCII)
+        self.normalize_unicode: bool = True       # Normalize Unicode using NFKC
 
 class MLTextProcessor:
     """
-    Processes and cleans text for training a transformer language model.
-
-    **Methods:**
-
-    - ``remove_html_markup(text)``: Strips HTML, CSS, and JavaScript.
-    - ``remove_problematic_unicode(text)``: Replaces problematic Unicode characters.
-    - ``remove_urls_and_emails(text)``: Removes URLs, email addresses, and domains.
-    - ``remove_code_snippets(text)``: Removes inline and block code snippets.
-    - ``normalize_text(text)``: Runs all processing steps on the input text.
-    - ``process_batch(texts)``: Processes a list of text strings.
+    Processes and cleans text for training.
+    
+    The cleaning pipeline includes:
+      1. Fixing broken Unicode with ftfy.
+      2. Removing HTML markup.
+      3. Replacing problematic Unicode characters.
+      4. Removing URLs and email addresses.
+      5. Removing code snippets (both block and inline).
+      6. Removing all non-English characters (keeping only ASCII).
+      7. Normalizing text with NFKC.
     """
     def __init__(self, config: MLTextConfig) -> None:
         self.config = config
-        self.device = DEVICE
 
     def remove_html_markup(self, text: str) -> str:
-        """
-        Removes HTML, CSS, and JavaScript markup from text.
-
-        Attempts to use ``lxml`` via BeautifulSoup; falls back to ``html.parser``
-        or regex if necessary.
-
-        :param text: Input text containing HTML markup.
-        :return: Text with HTML markup removed.
-        """
+        """Removes HTML, CSS, and JavaScript markup from text."""
         try:
-            soup = BeautifulSoup(text, "lxml")  # Use 'lxml' for better handling
+            soup = BeautifulSoup(text, "lxml")
             return soup.get_text(separator=" ")
         except FeatureNotFound:
-            logging.warning("⚠️ lxml not installed. Falling back to html.parser.")
+            logging.warning("lxml not installed. Falling back to html.parser.")
             try:
                 soup = BeautifulSoup(text, "html.parser")
                 return soup.get_text(separator=" ")
             except Exception as e:
-                logging.error(f"⚠️ Failed to parse HTML using BeautifulSoup: {e}. Using regex fallback.")
+                logging.error(f"Failed to parse HTML: {e}. Using regex fallback.")
                 return re.sub(r'<[^>]+>', '', text)
 
     def remove_problematic_unicode(self, text: str) -> str:
         """
         Replaces problematic Unicode characters with ASCII equivalents.
-
-        **Replacements include:**
-
-        - EN DASH (``\u2013``) to ``-``
-        - EM DASH (``\u2014``) to ``-``
-        - LEFT SINGLE QUOTATION MARK (``\u2018``) to ``'``
-        - RIGHT SINGLE QUOTATION MARK (``\u2019``) to ``'``
-        - LEFT DOUBLE QUOTATION MARK (``\u201C``) to ``"``
-        - RIGHT DOUBLE QUOTATION MARK (``\u201D``) to ``"``
-
-        :param text: Input text.
-        :return: Text with problematic Unicode characters replaced.
+        Replacements include common quotation marks and dashes.
         """
         unicode_replacements = {
             "\u2013": "-",  # EN DASH
@@ -138,100 +96,73 @@ class MLTextProcessor:
 
     def remove_urls_and_emails(self, text: str) -> str:
         """
-        Removes URLs, email addresses, and domain names from the text.
-
-        **Removal steps:**
-        
-        - Remove URLs beginning with ``http://``, ``https://``, or ``www.``
-        - Remove email addresses using a simple regex.
-        - Remove bare domain names (e.g., ``example.com``) with common TLDs.
-
-        :param text: Input text.
-        :return: Text with URLs, emails, and domains removed.
+        Removes URLs, email addresses, and bare domain names.
         """
-        # Remove URLs (http://, https://, or www.)
         text = re.sub(r'https?://\S+|www\.\S+', ' ', text)
-        # Remove email addresses (a simple but effective pattern)
         text = re.sub(r'\b[\w\.-]+@[\w\.-]+\.\w+\b', ' ', text)
-        # Remove domain names that are not part of an email or URL (e.g., example.com)
         text = re.sub(r'\b(?:[a-z0-9-]+\.)+(?:com|org|net|edu|gov|mil|biz|info|mobi|name|aero|asia|jobs|museum)\b',
                       ' ', text, flags=re.IGNORECASE)
-        # Clean up any extra whitespace created during removal
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip()
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
 
     def remove_code_snippets(self, text: str) -> str:
         """
-        Removes inline and block code snippets while keeping normal text.
-
-        **Removals include:**
-
-        - Multi-line code blocks enclosed in triple backticks.
-        - Inline code enclosed in single backticks.
-        - Lines starting with a comment symbol (``#``).
-
-        :param text: Input text containing code.
-        :return: Text with code snippets removed.
+        Removes code snippets:
+         - Multi-line code blocks enclosed in triple backticks.
+         - Inline code enclosed in single backticks.
+         - Lines starting with a comment symbol.
         """
-        text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)  # Remove multi-line code blocks
-        text = re.sub(r"`[^`]+`", "", text)  # Remove inline code
-        text = re.sub(r"#.*", "", text)  # Remove commented-out lines
+        text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+        text = re.sub(r"`[^`]+`", "", text)
+        text = re.sub(r"#.*", "", text)
         return text
+
+    def remove_non_english_text(self, text: str) -> str:
+        """
+        Removes all non-English characters by retaining only ASCII characters.
+        This effectively removes characters outside the U+0000 to U+007F range.
+        """
+        return re.sub(r'[^\x00-\x7F]+', ' ', text).strip()
 
     def normalize_text(self, text: str) -> str:
         """
-        Applies all preprocessing steps to the text.
-
-        **Steps include:**
-
-        - Fixing text with ``ftfy``.
-        - Removing HTML markup.
-        - Replacing problematic Unicode characters.
-        - Removing URLs and email addresses.
-        - Removing code snippets.
-
-        :param text: Input text.
-        :return: Fully normalized and cleaned text.
+        Applies the full cleaning pipeline:
+          1. Fix broken Unicode.
+          2. Remove HTML markup.
+          3. Replace problematic Unicode.
+          4. Remove URLs and email addresses.
+          5. Remove code snippets.
+          6. Convert to lowercase (if enabled).
+          7. Remove all non-English characters (if enabled).
+          8. Normalize Unicode with NFKC.
         """
         text = ftfy.fix_text(text)
         if self.config.remove_html:
             text = self.remove_html_markup(text)
         text = self.remove_problematic_unicode(text)
         if self.config.remove_urls or self.config.remove_emails:
-            text = self.remove_urls_and_emails(text)  # Fully remove URLs & emails
+            text = self.remove_urls_and_emails(text)
         if self.config.remove_code_snippets:
-            text = self.remove_code_snippets(text)  # Remove code snippets
+            text = self.remove_code_snippets(text)
+        if self.config.do_lowercase:
+            text = text.lower()
+        if self.config.remove_non_english:
+            text = self.remove_non_english_text(text)
+        if self.config.normalize_unicode:
+            text = unicodedata.normalize('NFKC', text)
         return text.strip()
 
     def process_batch(self, texts: List[str]) -> List[str]:
-        """
-        Processes a batch of texts.
-
-        :param texts: List of text strings to process.
-        :return: List of normalized and cleaned text strings.
-        """
+        """Processes a list of text strings."""
         return [self.normalize_text(t) for t in texts]
 
-
+# -------------------- File Processor --------------------
 class MLFileProcessor:
     """
-    Processes text files using the MLTextProcessor.
-
-    This class recursively searches for all ``*.txt`` files in the given
-    directory, processes each file, and writes the cleaned text back to the file.
-
-    **Methods:**
-
-    - ``_process_file(input_path)``: Processes an individual file.
-    - ``process_directory(max_workers)``: Processes all text files in a directory.
+    Processes text files in a directory using MLTextProcessor.
+    Recursively finds all .txt files, cleans them, and writes the cleaned text back.
     """
     def __init__(self, input_dir: Path, config: MLTextConfig) -> None:
-        """
-        Initializes the file processor.
-
-        :param input_dir: Path to the directory containing text files.
-        :param config: An instance of MLTextConfig with processing settings.
-        """
         self.input_dir = input_dir
         self.processor = MLTextProcessor(config)
         self.stop_event = Event()
@@ -242,23 +173,10 @@ class MLFileProcessor:
         signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, signum, frame) -> None:
-        """
-        Handles termination signals gracefully.
-
-        :param signum: The signal number.
-        :param frame: The current stack frame.
-        """
-        logging.warning(f"⚠️ Received termination signal {signum}. Stopping processing...")
+        logging.warning(f"Received termination signal {signum}. Stopping processing...")
         self.stop_event.set()
 
     def _process_file(self, input_path: Path) -> None:
-        """
-        Processes a single file.
-
-        Reads the file, normalizes its text, and writes the cleaned text back.
-
-        :param input_path: Path to the text file to be processed.
-        """
         if self.stop_event.is_set():
             return
         try:
@@ -273,13 +191,6 @@ class MLFileProcessor:
             logging.error(f"Error processing file {input_path}: {e}")
 
     def process_directory(self, max_workers: Optional[int] = None) -> None:
-        """
-        Processes all text files in the directory.
-
-        Uses a ThreadPoolExecutor to process files in parallel.
-
-        :param max_workers: Maximum number of threads to use.
-        """
         input_files = list(self.input_dir.rglob('*.txt'))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(self._process_file, f) for f in input_files]
@@ -287,38 +198,49 @@ class MLFileProcessor:
                 try:
                     future.result()
                 except Exception as e:
-                    logging.error(f"⚠️ Error in future processing: {e}")
+                    logging.error(f"Error in future processing: {e}")
 
-
+# -------------------- Main Test --------------------
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
-
-    # Test the URL and email removal
+    
+    # --- Test cleaning on a sample text ---
     test_text = """
-    Check out our website at https://example.com or www.test.com!
-    Contact us at test@example.com or complex.email+label@sub.domain.com
-    Here's a tricky URL: http://test.com/path?param=value#fragment
-    And a hidden email: user.name123@subdomain.company.co.uk
-    Also check example.com and test.org for more info.
+    Hello, how are you? Visit our website at https://example.com and contact us at test@example.com.
+    Here is some code: ```def hello(): print("Hello World!")```
+    And some HTML: <p>This is a paragraph.</p>
+    Non-English: こんにちは、世界！ Привет, мир!
     """
     
     config = MLTextConfig()
+    # For perfect cleaning: remove HTML, URLs, emails, code, and remove all non-English characters.
+    config.do_lowercase = True
+    config.remove_html = True
+    config.remove_urls = True
+    config.remove_emails = True
+    config.remove_code_snippets = True
+    config.remove_non_english = True
+    config.normalize_unicode = True
+
     processor = MLTextProcessor(config)
     
-    print("Testing URL and email removal:")
-    print("\nOriginal text:")
-    print(test_text)
-    print("\nCleaned text:")
-    print(processor.remove_urls_and_emails(test_text))
+    cleaned = processor.normalize_text(test_text)
+    logging.info("=== Cleaning Test ===")
+    logging.info(f"Original Text:\n{test_text}")
+    logging.info(f"Cleaned Text:\n{cleaned}")
     
-    # Process directory if path is provided via command line, else use default
+    # --- Process a directory if provided ---
     if len(sys.argv) > 1:
         input_directory = Path(sys.argv[1])
     else:
-        input_directory = Path(r"C:\Users\ASUS\Desktop\PreProcessed\processed\cleaned\test")
+        # Default directory (change as needed)
+        input_directory = Path(r"C:\Users\ASUS\Desktop\PreProcessed\processed\cleaned")
     
     file_processor = MLFileProcessor(input_directory, config)
     file_processor.process_directory(max_workers=4)
+    
+    # Force garbage collection after processing
+    gc.collect()

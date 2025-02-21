@@ -1,34 +1,33 @@
 training:
   device: "cuda"
-  epochs: 30
-  batch_size: 8                 # Can use larger batch with smaller model
-  learning_rate: 0.0003
-  weight_decay: 0.1
-  max_grad_norm: 0.5
-  gradient_accumulation_steps: 4  # Reduced as model is smaller
+  epochs: 100                         # Increased to allow better convergence
+  batch_size: 32                      # Increased for more stable gradients
+  learning_rate: 0.0001              # Reduced to 1e-4 for stability
+  weight_decay: 0.01                 
+  max_grad_norm: 1.0                 # Reduced from 0.5 for better stability
+  gradient_accumulation_steps: 4      # Adjusted for larger effective batch
   seed: 42
   resume_from_checkpoint: null
-  checkpoint_dir: "checkpoints"
-  checkpoint_save_frequency: 1
-  scheduler_type: "cosine_with_min_lr"
+  checkpoint_dir: "model"
+  checkpoint_save_frequency: 2
+  scheduler_type: "cosine_warmup"     # Changed to cosine with warmup
   lr_scheduler_kwargs:
-    min_lr: 1e-6
-  warmup_ratio: 0.05
-  log_every_n_steps: 50
+    warmup_steps: 2000               # Increased warmup period
+  warmup_ratio: 0.15                 # Increased warmup ratio
+  log_every_n_steps: 10
   eval_every_n_epochs: 1
-  early_stopping_patience: 3
+  early_stopping_patience: 10         # Increased to allow proper convergence
   use_mixed_precision: true
-  amp_scaler_init_scale: 256
-  use_gradient_checkpointing: false  # Not needed for smaller model
+  amp_scaler_init_scale: 64          # Reduced for more stable mixed precision
   enable_gradient_accumulation: true
-  max_grad_value: 5.0
-  use_noise_injection: true         # Enable noise injection for encoder inputs
-  noise_type: "mask"                # Type of noise to apply (e.g., "mask")
-  noise_prob: 0.3                   # Probability of noise injection
+  max_grad_value: 1.0                # Reduced from 5.0
+  use_noise_injection: true
+  noise_type: "mask"
+  noise_prob: 0.15                   # Reduced from 0.2 for initial training
 
 dataset:
   train_dataset: "local_data"
-  max_seq_len: 128             # Kept smaller for efficiency
+  max_seq_len: 64
   num_workers: 2
   shuffle: true
   pin_memory: true
@@ -36,9 +35,9 @@ dataset:
   persistent_workers: true
   preprocessing:
     lowercase: true
-    min_length: 10
+    min_length: 5
   split:
-    test_size: 0.2
+    test_size: 0.1                   # Reduced to 0.1 for more training data
     random_state: 42
 
 tokenizer:
@@ -46,34 +45,31 @@ tokenizer:
   add_special_tokens: true
 
 model:
-  hidden_dim: 192              # Carefully sized for target params
-  num_layers: 4                # Reduced layers
-  num_heads: 6                 # Balanced heads
-  ff_dim: 384                 # 2x hidden_dim
-  dropout: 0.1
-  vocab_size: 8000            # Increased vocab
-  max_seq_len: 128
+  hidden_dim: 128
+  num_layers: 2
+  num_heads: 4
+  ff_dim: 256
+  dropout: 0.1                       # Keep as is for now
+  vocab_size: 8000
+  max_seq_len: 64
   use_checkpointing: true
   activation: "gelu"
   tie_embeddings: true
-  window_size: 4
-  global_tokens: 1
+  window_size: 16
+  global_tokens: 2                   # Increased from 1 for better global context
   use_reentrant: false
 
 logging:
-  log_dir: "SPARSA-LM-Base 0.1/logs"
-  use_wandb: false
-  wandb_project: "LuminaLM_Base_Small"
-  wandb_entity: null
+  log_dir: "SPARSA-LM-Base 0.1/logs_test"
+  use_wandb: true
   log_gradients: true
   log_model_weights: false
   log_train_steps: true
-  log_frequency: 1000
-  gradient_logging_frequency: 5000
+  log_frequency: 250                 # Reduced from 500 for better monitoring
 
 memory_monitor:
   enabled: true
-  log_frequency: 25
+  log_frequency: 10
   monitor_gpu: true
   monitor_cpu: true
   empty_cache: true
