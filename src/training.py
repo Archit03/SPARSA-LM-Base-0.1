@@ -7,7 +7,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
-from transformers import PreTrainedTokenizerFast, get_scheduler, get_linear_schedule_with_warmup
+from transformers import PreTrainedTokenizerFast, get_linear_schedule_with_warmup
 from typing import Dict, Any, Optional, Tuple
 import transformers
 import traceback
@@ -17,9 +17,11 @@ from utils import setup_logging, save_checkpoint, load_checkpoint, set_seed, Mem
 from torch.amp import GradScaler
 import optuna
 from sklearn.model_selection import train_test_split
+import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 # ----------------------------------------------------------------------
-# Debugging Utilities
+# Debugging Utilities (unchanged)
 # ----------------------------------------------------------------------
 def debug_tensor_values(tensor: torch.Tensor, name: str, logger: logging.Logger) -> bool:
     try:
@@ -90,14 +92,14 @@ def debug_loss_inputs(outputs: torch.Tensor, labels: torch.Tensor, vocab_size: i
         return None, None
 
 # ----------------------------------------------------------------------
-# Additional Classes/Exceptions
+# Additional Classes/Exceptions (unchanged)
 # ----------------------------------------------------------------------
 class ConfigurationError(Exception):
     """Custom exception for configuration-related errors."""
     pass
 
 # ----------------------------------------------------------------------
-# Trainer Class
+# Trainer Class (updated)
 # ----------------------------------------------------------------------
 class Trainer:
     def __init__(self, training_config: Dict, data_config: Dict):
@@ -105,6 +107,13 @@ class Trainer:
             self._validate_config(training_config)
             self.config = training_config
             self.data_config = data_config
+
+            # Set deterministic algorithms and anomaly detection if enabled
+            if self.config.get("extras", {}).get("deterministic_algorithms", False):
+                torch.use_deterministic_algorithms(True)
+                torch.backends.cudnn.deterministic = True
+            if self.config.get("extras", {}).get("detect_anomaly", False):
+                torch.autograd.set_detect_anomaly(True)
 
             # Early stopping setup
             self.best_metric = float('inf')
@@ -125,7 +134,6 @@ class Trainer:
             set_seed(self.config['training']['seed'])
 
             # --- Tokenizer Loading & Special Tokens Setup ---
-            # Load tokenizer from its directory. If the provided path is a file, use its parent directory.
             tokenizer_path = self.config['tokenizer']['path']
             if os.path.isfile(tokenizer_path):
                 tokenizer_dir = os.path.dirname(tokenizer_path)
@@ -135,7 +143,6 @@ class Trainer:
             self.tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_dir)
             self.logger.info(f"Tokenizer loaded with vocab size: {self.tokenizer.vocab_size}")
 
-            # Define the expected special tokens.
             expected_special_tokens = {
                 "pad_token": "[PAD]",
                 "unk_token": "[UNK]",
@@ -146,7 +153,6 @@ class Trainer:
                 "eos_token": "[EOS]"
             }
 
-            # Build the special tokens mapping using the tokenizer’s built-in lists.
             special_mapping = {}
             for key, token in expected_special_tokens.items():
                 if token in self.tokenizer.all_special_tokens:
@@ -156,12 +162,10 @@ class Trainer:
                 special_mapping[key] = (token, token_id)
             self.logger.info(f"Special tokens mapping (derived from vocabulary): {special_mapping}")
 
-            # Identify missing special tokens (those with token_id==None) and add them.
             missing_tokens = {key: token for key, (token, token_id) in special_mapping.items() if token_id is None}
             if missing_tokens:
                 self.logger.info(f"Missing special tokens detected: {missing_tokens}. Adding them...")
                 self.tokenizer.add_special_tokens(missing_tokens)
-                # Update the mapping after adding tokens.
                 vocab = self.tokenizer.get_vocab()
                 for key, token in expected_special_tokens.items():
                     token_id = vocab.get(token)
@@ -170,7 +174,6 @@ class Trainer:
             else:
                 self.logger.info("All special tokens are present with IDs.")
 
-            # Explicitly set the tokenizer's attributes.
             self.tokenizer.pad_token = expected_special_tokens["pad_token"]
             self.tokenizer.unk_token = expected_special_tokens["unk_token"]
             self.tokenizer.cls_token = expected_special_tokens["cls_token"]
@@ -179,7 +182,6 @@ class Trainer:
             self.tokenizer.bos_token = expected_special_tokens["bos_token"]
             self.tokenizer.eos_token = expected_special_tokens["eos_token"]
 
-            # Save the updated tokenizer so subsequent loads include the special tokens.
             self.tokenizer.save_pretrained(tokenizer_dir)
             # ------------------------------------------------------------------
 
@@ -224,17 +226,14 @@ class Trainer:
 
             scheduler_type = self.config["training"].get("scheduler_type", "linear")
             lr_scheduler_kwargs = self.config["training"].get("lr_scheduler_kwargs", {})
-            if scheduler_type == "cosine_with_min_lr":
+            if scheduler_type in ["cosine_with_min_lr", "cosine_warmup"]:
                 if 'min_lr' not in lr_scheduler_kwargs and 'min_lr_rate' not in lr_scheduler_kwargs:
                     self.logger.warning("`min_lr` not found in `lr_scheduler_kwargs`, using default 1e-6")
                     lr_scheduler_kwargs['min_lr'] = 1e-6
-            if scheduler_type == "cosine_with_min_lr" and 'min_lr' not in lr_scheduler_kwargs and 'min_lr_rate' not in lr_scheduler_kwargs:
-                raise ValueError("`lr_scheduler_kwargs` must contain either `min_lr` or `min_lr_rate`.")
 
             self.enable_gradient_accumulation = self.config['training'].get('enable_gradient_accumulation', True)
             self.gradient_accumulation_steps = self.config['training'].get('gradient_accumulation_steps', 1) if self.enable_gradient_accumulation else 1
 
-            # Instantiate model configuration.
             model_config = TransformerConfig(
                 d_model=self.config['model']['hidden_dim'],
                 num_heads=self.config['model']['num_heads'],
@@ -246,7 +245,7 @@ class Trainer:
                 max_seq_len=self.config['model']['max_seq_len'],
                 activation=self.config['model'].get('activation', 'gelu'),
                 use_rope=self.config['model'].get('use_rope', True),
-                prenorm=self.config['model'].get('prenorm', True),
+                normalize_before=self.config['model'].get('normalize_before', True),  # Use normalize_before from config
                 vocab_size=self.config['model']['vocab_size'],
                 tie_embeddings=self.config['model'].get('tie_embeddings', False),
                 scheduler_type=scheduler_type,
@@ -267,7 +266,7 @@ class Trainer:
 
             def _init_weights(module):
                 if isinstance(module, (torch.nn.Linear, torch.nn.Embedding)):
-                    torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                    torch.nn.init.normal_(module.weight, mean=0.0, std=self.config['model'].get('initializer_range', 0.02))
                     if isinstance(module, torch.nn.Linear) and module.bias is not None:
                         torch.nn.init.zeros_(module.bias)
                 elif isinstance(module, torch.nn.LayerNorm):
@@ -292,6 +291,10 @@ class Trainer:
 
             self.scaler = GradScaler(enabled=self.config['training'].get('use_mixed_precision', True))
 
+            # --- Extras: Set up empty CUDA cache and anomaly detection ---
+            self.empty_cuda_cache_freq = self.config.get("extras", {}).get("empty_cuda_cache_freq", 10)
+            # -------------------------------------------------------------------
+
             # --- Optional: Test tokenizer with a simple encode/decode ---
             test_sentence = "Hello, how are you?"
             encoded_ids = self.tokenizer.encode(test_sentence)
@@ -313,13 +316,17 @@ class Trainer:
         num_warmup_steps = int(num_training_steps * config.get('warmup_ratio', 0.1))
         scheduler_type = config.get("scheduler_type", "linear")
         lr_scheduler_kwargs = config.get("lr_scheduler_kwargs", {})
-        if scheduler_type == "cosine_with_min_lr":
-            min_lr = float(lr_scheduler_kwargs.get('min_lr', 1e-6))
-            return torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=num_training_steps - num_warmup_steps,
-                eta_min=min_lr
-            )
+
+        if scheduler_type in ["cosine_warmup", "cosine_with_min_lr"]:
+            default_min_lr = 0.0 if scheduler_type == "cosine_warmup" else 1e-6
+            min_lr = float(lr_scheduler_kwargs.get("min_lr", default_min_lr))
+            def lr_lambda(step):
+                if step < num_warmup_steps:
+                    return float(step) / float(max(1, num_warmup_steps))
+                else:
+                    progress = float(step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+                    return min_lr + (self.config['training']['learning_rate'] - min_lr) * 0.5 * (1.0 + np.cos(np.pi * progress))
+            return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         elif scheduler_type == "linear_warmup":
             return transformers.get_linear_schedule_with_warmup(
                 optimizer,
@@ -346,11 +353,17 @@ class Trainer:
             {'params': decay_params, 'weight_decay': self.config['training']['weight_decay']},
             {'params': no_decay_params, 'weight_decay': 0.0}
         ]
+        # Use parameters from the optimizer block if provided
+        optimizer_params = self.config.get("optimizer", {})
+        eps = float(optimizer_params.get("eps", 1e-8))
+        betas = tuple(optimizer_params.get("betas", [0.9, 0.999]))
+        fused = optimizer_params.get("fused", False)
+        # Note: gradient centralization is not implemented here; add custom logic if needed.
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters,
             lr=self.config['training']['learning_rate'],
-            betas=(0.9, 0.999),
-            eps=1e-8,
+            betas=betas,
+            eps=eps,
             weight_decay=self.config['training']['weight_decay'],
             amsgrad=True
         )
@@ -564,6 +577,11 @@ class Trainer:
 
                 current_lr = self.scheduler.get_last_lr()[0] if self.scheduler else self.config['training']['learning_rate']
                 progress_bar.set_postfix({'loss': loss.item(), 'lr': f'{current_lr:.2e}', 'grad_norm': f'{grad_norm:.2e}' if 'grad_norm' in locals() else 'N/A'})
+
+                # Periodically empty CUDA cache if specified in extras
+                if step % self.config.get("extras", {}).get("empty_cuda_cache_freq", 10) == 0:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
             except RuntimeError as e:
                 if "CUDA out of memory" in str(e):

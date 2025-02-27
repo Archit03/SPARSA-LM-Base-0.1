@@ -650,6 +650,17 @@ class MedicalTokenizer:
                 pair="$A $B",
                 special_tokens=[]
             )
+        self.tokenizer.enable_padding(
+        padding=self.padding_config['strategy'],
+        pad_id=self.padding_config['pad_token_id'],
+        pad_token=self.padding_config['pad_token'],
+        pad_to_multiple_of=self.padding_config['pad_to_multiple_of']
+        )
+        self.tokenizer.enable_truncation(
+        max_length=self.truncation_config['max_length'],
+        stride=self.truncation_config['stride'],
+        strategy=self.truncation_config['strategy']
+        )
     
     def _calculate_dynamic_vocab_size(self) -> int:
         # Return provided vocab_size or default to 4000 if not specified

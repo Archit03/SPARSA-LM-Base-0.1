@@ -34,11 +34,11 @@ class TransformerConfig:
         
         # Attention Mechanisms
         use_rope: bool = True,
-        window_size: int = 4,
+        window_size: int = 8,           # Updated default window_size = 8
         global_tokens: int = 0,
         
         # Architecture Options
-        prenorm: bool = True,
+        normalize_before: bool = True,  # Using pre-norm architecture (replaces prenorm)
         tie_embeddings: bool = False,
         
         # Training Features
@@ -68,8 +68,10 @@ class TransformerConfig:
         # Device
         device: Optional[torch.device] = None,
         
-        # Added parameter
-        use_reentrant: bool = True
+        # Additional parameters
+        use_reentrant: bool = True,
+        initializer_range: float = 0.02,   # New: weight initialization range
+        use_layer_norm: bool = True         # New: explicitly enable layer norm
     ):
         """Initialize transformer configuration with validation."""
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
@@ -89,7 +91,7 @@ class TransformerConfig:
         self.window_size = window_size
         self.global_tokens = global_tokens
         
-        self.prenorm = prenorm
+        self.normalize_before = normalize_before  # pre-norm ordering
         self.tie_embeddings = tie_embeddings
         
         self.use_checkpointing = use_checkpointing
@@ -119,6 +121,10 @@ class TransformerConfig:
 
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.use_reentrant = use_reentrant
+        
+        # New parameters
+        self.initializer_range = initializer_range
+        self.use_layer_norm = use_layer_norm
 
 ########################################################################################
 # Core Components - Positional Encodings
@@ -142,11 +148,10 @@ class RotaryPositionalEmbedding(nn.Module):
             raise ValueError(f"Sequence length {seq_len} exceeds maximum allowed length {self.max_seq_len}")
         if seq_len > self.seq_len_cached:
             self.seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=x.device).unsqueeze(1)  # shape: [seq_len, 1]
-            # Use broadcasting to compute frequencies without explicit loops
-            freqs = t * self.inv_freq.unsqueeze(0)  # shape: [seq_len, dim/2]
-            emb = torch.cat((freqs, freqs), dim=-1)   # shape: [seq_len, dim]
-            emb = emb.unsqueeze(0).unsqueeze(0)  # shape: [1, 1, seq_len, dim]
+            t = torch.arange(seq_len, device=x.device).unsqueeze(1)
+            freqs = t * self.inv_freq.unsqueeze(0)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            emb = emb.unsqueeze(0).unsqueeze(0)
             self.cos_cached = emb.cos()
             self.sin_cached = emb.sin()
         return self.cos_cached[:, :, :seq_len, :], self.sin_cached[:, :, :seq_len, :]
@@ -175,7 +180,6 @@ class PositionalEncoding(nn.Module):
 class SparseMultiHeadAttention(nn.Module):
     """
     Multi-Head Attention with Sparse Local Windowing and Optional Global Tokens.
-    Minor improvement: vectorized mask building can be implemented in future.
     """
     def __init__(self, config, is_causal=False):
         super().__init__()
@@ -199,7 +203,6 @@ class SparseMultiHeadAttention(nn.Module):
             nn.init.zeros_(layer.bias)
 
     def build_local_window_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
-        # Minor tweak: a more vectorized approach can replace this loop in the future.
         mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device=device)
         for i in range(seq_len):
             start = max(0, i - self.window_size)
@@ -340,7 +343,10 @@ class EncoderBlock(nn.Module):
         next_kv = None
         def sa_sublayer(normed_x):
             nonlocal next_kv
-            out, new_kv = self.self_attn(normed_x, normed_x, normed_x, attn_mask=src_mask, past_key_value=past_key_value, use_cache=use_cache)
+            out, new_kv = self.self_attn(normed_x, normed_x, normed_x,
+                                          attn_mask=src_mask,
+                                          past_key_value=past_key_value,
+                                          use_cache=use_cache)
             next_kv = new_kv
             return out
         x = self.self_attn_res(x, sa_sublayer)
@@ -407,7 +413,7 @@ class Encoder(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
         self.layers = nn.ModuleList([EncoderBlock(config) for _ in range(config.num_layers)])
-        self.norm = nn.LayerNorm(config.d_model)
+        self.norm = nn.LayerNorm(config.d_model) if config.use_layer_norm else nn.Identity()
     
     def forward(self, x, src_mask=None, past_key_values=None, use_cache=False):
         next_past_key_values = []
@@ -435,7 +441,7 @@ class Decoder(nn.Module):
     def __init__(self, config: TransformerConfig):
         super().__init__()
         self.layers = nn.ModuleList([DecoderBlock(config) for _ in range(config.num_layers)])
-        self.norm = nn.LayerNorm(config.d_model)
+        self.norm = nn.LayerNorm(config.d_model) if config.use_layer_norm else nn.Identity()
 
     def forward(self, x, encoder_output, tgt_mask=None, src_mask=None, past_key_values=None, use_cache=False):
         next_past_key_values = []
@@ -520,8 +526,10 @@ class Transformer(nn.Module):
         
         self._reset_parameters()
         
-        self.scaler = torch.amp.GradScaler(device="cuda" if torch.cuda.is_available() else "cpu",
-                                            enabled=config.use_mixed_precision)
+        self.scaler = torch.amp.GradScaler(
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            enabled=config.use_mixed_precision
+        )
         self.metrics = {
             'train': {'loss': [], 'accuracy': [], 'perplexity': []},
             'val': {'loss': [], 'accuracy': [], 'perplexity': []}
@@ -574,8 +582,10 @@ class Transformer(nn.Module):
         else:
             src_noisy = src
         
-        with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu",
-                                enabled=self.config.use_mixed_precision):
+        with torch.amp.autocast(
+            device_type="cuda" if torch.cuda.is_available() else "cpu",
+            enabled=self.config.use_mixed_precision
+        ):
             enc_inp = self.embedding(src_noisy)
             if not self.config.use_rope:
                 enc_inp = self.pos_encoding(enc_inp)

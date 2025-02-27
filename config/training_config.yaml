@@ -1,34 +1,36 @@
 training:
   device: "cuda"
-  epochs: 100                         # Increased to allow better convergence
-  batch_size: 32                      # Increased for more stable gradients
-  learning_rate: 0.0001              # Reduced to 1e-4 for stability
+  epochs: 10                      
+  batch_size: 64                      # Further reduced from 16 for stability
+  learning_rate: 0.00003             # Reduced to prevent gradient explosion
   weight_decay: 0.01                 
-  max_grad_norm: 1.0                 # Reduced from 0.5 for better stability
-  gradient_accumulation_steps: 4      # Adjusted for larger effective batch
+  max_grad_norm: 0.1                 # Stricter gradient clipping
+  gradient_accumulation_steps: 32    # Increased to maintain effective batch size
   seed: 42
   resume_from_checkpoint: null
   checkpoint_dir: "model"
   checkpoint_save_frequency: 2
-  scheduler_type: "cosine_warmup"     # Changed to cosine with warmup
+  scheduler_type: "linear_warmup"    # Changed to linear for more stability
   lr_scheduler_kwargs:
-    warmup_steps: 2000               # Increased warmup period
-  warmup_ratio: 0.15                 # Increased warmup ratio
+    warmup_steps: 2000               # Reduced warmup steps
+    min_lr: 1e-7                     # Lower minimum learning rate
+  # Removed warmup_ratio to avoid conflict with warmup_steps
   log_every_n_steps: 10
   eval_every_n_epochs: 1
-  early_stopping_patience: 10         # Increased to allow proper convergence
+  early_stopping_patience: 5         # Reduced to catch issues earlier
   use_mixed_precision: true
-  amp_scaler_init_scale: 64          # Reduced for more stable mixed precision
-  enable_gradient_accumulation: true
-  max_grad_value: 1.0                # Reduced from 5.0
-  use_noise_injection: true
+  amp_scaler_init_scale: 8           # Significantly lowered for stability
+  # Removed redundant enable_gradient_accumulation
+  max_grad_value: 0.1                # Stricter gradient value limiting
+  use_noise_injection: true         # Disabled during initial training
+  # Noise settings preserved but disabled for now
   noise_type: "mask"
-  noise_prob: 0.15                   # Reduced from 0.2 for initial training
+  noise_prob: 0.01                   # Reduced for future use
 
 dataset:
   train_dataset: "local_data"
   max_seq_len: 64
-  num_workers: 2
+  num_workers: 8
   shuffle: true
   pin_memory: true
   prefetch_factor: 2
@@ -37,7 +39,7 @@ dataset:
     lowercase: true
     min_length: 5
   split:
-    test_size: 0.1                   # Reduced to 0.1 for more training data
+    test_size: 0.1
     random_state: 42
 
 tokenizer:
@@ -49,23 +51,26 @@ model:
   num_layers: 2
   num_heads: 4
   ff_dim: 256
-  dropout: 0.1                       # Keep as is for now
+  dropout: 0.2                       # Increased dropout for regularization
   vocab_size: 8000
   max_seq_len: 64
   use_checkpointing: true
   activation: "gelu"
   tie_embeddings: true
   window_size: 16
-  global_tokens: 2                   # Increased from 1 for better global context
+  global_tokens: 4
   use_reentrant: false
+  initializer_range: 0.02            # Added smaller weight initialization
+  use_layer_norm: true               # Explicit layer normalization
+  normalize_before: true             # Pre-norm architecture
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs_test"
-  use_wandb: true
+  use_wandb: false
   log_gradients: true
   log_model_weights: false
   log_train_steps: true
-  log_frequency: 250                 # Reduced from 500 for better monitoring
+  log_frequency: 100                 # Less frequent logging to reduce overhead
 
 memory_monitor:
   enabled: true
@@ -73,3 +78,19 @@ memory_monitor:
   monitor_gpu: true
   monitor_cpu: true
   empty_cache: true
+  max_memory_usage_percentage: 90    # Added to prevent OOM errors
+
+optimizer:                           # Added optimizer section
+  type: "adamw"
+  eps: 1e-8
+  betas: [0.9, 0.999]
+  fused: false                       # Set to true if using newer CUDA versions
+  gradient_centralization: true      # Helps with gradient stability
+
+extras:
+  use_gradient_checkpointing: true   # Memory efficient backprop
+  activation_checkpointing: true     # Additional memory savings
+  fp16_opt_level: "O1"               # Conservative mixed precision
+  deterministic_algorithms: true     # For reproducibility
+  detect_anomaly: true               # Enable anomaly detection during initial runs
+  empty_cuda_cache_freq: 10          # Clear CUDA cache periodically
