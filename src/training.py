@@ -20,6 +20,8 @@ from sklearn.model_selection import train_test_split
 import os
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
+
+
 # ----------------------------------------------------------------------
 # Debugging Utilities (unchanged)
 # ----------------------------------------------------------------------
@@ -491,6 +493,7 @@ class Trainer:
         step_in_epoch = 0
         accumulation_counter = 0
         accum_loss = 0.0
+        raw_loss_accum = 0.0  # To accumulate the raw (unscaled) loss for logging
 
         if not hasattr(self, 'scaler') or self.scaler is None:
             self.scaler = GradScaler(
@@ -530,15 +533,18 @@ class Trainer:
                     flat_labels = labels.view(-1)
                     eps = 1e-8
                     flat_outputs = flat_outputs + eps
-                    loss = self.criterion(flat_outputs, flat_labels)
-                    if not torch.isfinite(loss):
+                    # Compute raw loss (mean per token)
+                    raw_loss = self.criterion(flat_outputs, flat_labels)
+                    if not torch.isfinite(raw_loss):
                         self.logger.warning(f"Step {step} - Non-finite loss detected, skipping batch")
                         continue
-                    loss = loss / self.gradient_accumulation_steps
+                    # Scale loss for gradient accumulation
+                    loss = raw_loss / self.gradient_accumulation_steps
 
                 self.scaler.scale(loss).backward()
                 accumulation_counter += 1
                 accum_loss += loss.item()
+                raw_loss_accum += raw_loss.item()  # accumulate raw loss
 
                 if accumulation_counter == self.gradient_accumulation_steps:
                     self.scaler.unscale_(self.optimizer)
@@ -566,7 +572,7 @@ class Trainer:
                         self.scaler.update()
                         if self.scheduler is not None:
                             self.scheduler.step()
-                        total_loss += accum_loss
+                        total_loss += raw_loss_accum  # add raw loss
                         step_in_epoch += 1
                     else:
                         self.logger.warning(f"Step {step} - Invalid gradients, skipping optimizer step.")
@@ -574,9 +580,16 @@ class Trainer:
                     self.optimizer.zero_grad(set_to_none=True)
                     accumulation_counter = 0
                     accum_loss = 0.0
+                    raw_loss_accum = 0.0
 
                 current_lr = self.scheduler.get_last_lr()[0] if self.scheduler else self.config['training']['learning_rate']
-                progress_bar.set_postfix({'loss': loss.item(), 'lr': f'{current_lr:.2e}', 'grad_norm': f'{grad_norm:.2e}' if 'grad_norm' in locals() else 'N/A'})
+                # Multiply loss.item() by gradient_accumulation_steps to log the true raw loss
+                adjusted_loss = loss.item() * self.gradient_accumulation_steps
+                progress_bar.set_postfix({
+                    'loss': f'{adjusted_loss:.4f}', 
+                    'lr': f'{current_lr:.2e}', 
+                    'grad_norm': f'{grad_norm:.2e}' if 'grad_norm' in locals() else 'N/A'
+                })
 
                 # Periodically empty CUDA cache if specified in extras
                 if step % self.config.get("extras", {}).get("empty_cuda_cache_freq", 10) == 0:
@@ -590,7 +603,7 @@ class Trainer:
                 raise e
 
             if self.use_wandb:
-                wandb.log({"train/loss": loss.item(), "train/learning_rate": self.scheduler.get_last_lr()[0]})
+                wandb.log({"train/loss": adjusted_loss, "train/learning_rate": current_lr})
 
         avg_loss = total_loss / step_in_epoch if step_in_epoch > 0 else float('inf')
         return avg_loss, self._calculate_perplexity(avg_loss)

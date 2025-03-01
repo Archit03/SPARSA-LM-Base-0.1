@@ -1,36 +1,33 @@
 training:
   device: "cuda"
-  epochs: 10                      
-  batch_size: 64                      # Further reduced from 16 for stability
-  learning_rate: 0.00003             # Reduced to prevent gradient explosion
-  weight_decay: 0.01                 
-  max_grad_norm: 0.1                 # Stricter gradient clipping
-  gradient_accumulation_steps: 32    # Increased to maintain effective batch size
+  epochs: 10
+  batch_size: 128
+  learning_rate: 0.0003             # Increased learning rate (10x higher) for faster convergence
+  weight_decay: 0.01
+  max_grad_norm: 0.1
+  gradient_accumulation_steps: 32
   seed: 42
   resume_from_checkpoint: null
   checkpoint_dir: "model"
   checkpoint_save_frequency: 2
-  scheduler_type: "linear_warmup"    # Changed to linear for more stability
+  scheduler_type: "linear_warmup"
   lr_scheduler_kwargs:
-    warmup_steps: 2000               # Reduced warmup steps
-    min_lr: 1e-7                     # Lower minimum learning rate
-  # Removed warmup_ratio to avoid conflict with warmup_steps
+    warmup_steps: 4000              # Adjust warmup steps if needed; you may experiment with this value
+    min_lr: 0.0000001
   log_every_n_steps: 10
   eval_every_n_epochs: 1
-  early_stopping_patience: 5         # Reduced to catch issues earlier
+  early_stopping_patience: 5
   use_mixed_precision: true
-  amp_scaler_init_scale: 8           # Significantly lowered for stability
-  # Removed redundant enable_gradient_accumulation
-  max_grad_value: 0.1                # Stricter gradient value limiting
-  use_noise_injection: true         # Disabled during initial training
-  # Noise settings preserved but disabled for now
+  amp_scaler_init_scale: 8
+  max_grad_value: 0.1
+  use_noise_injection: true
   noise_type: "mask"
-  noise_prob: 0.01                   # Reduced for future use
+  noise_prob: 0.01
 
 dataset:
   train_dataset: "local_data"
   max_seq_len: 64
-  num_workers: 8
+  num_workers: 4
   shuffle: true
   pin_memory: true
   prefetch_factor: 2
@@ -51,7 +48,7 @@ model:
   num_layers: 2
   num_heads: 4
   ff_dim: 256
-  dropout: 0.2                       # Increased dropout for regularization
+  dropout: 0.2
   vocab_size: 8000
   max_seq_len: 64
   use_checkpointing: true
@@ -60,17 +57,17 @@ model:
   window_size: 16
   global_tokens: 4
   use_reentrant: false
-  initializer_range: 0.02            # Added smaller weight initialization
-  use_layer_norm: true               # Explicit layer normalization
-  normalize_before: true             # Pre-norm architecture
+  initializer_range: 0.02
+  use_layer_norm: true
+  normalize_before: true
 
 logging:
   log_dir: "SPARSA-LM-Base 0.1/logs_test"
-  use_wandb: false
+  use_wandb: true
   log_gradients: true
   log_model_weights: false
   log_train_steps: true
-  log_frequency: 100                 # Less frequent logging to reduce overhead
+  log_frequency: 100
 
 memory_monitor:
   enabled: true
@@ -78,19 +75,19 @@ memory_monitor:
   monitor_gpu: true
   monitor_cpu: true
   empty_cache: true
-  max_memory_usage_percentage: 90    # Added to prevent OOM errors
+  max_memory_usage_percentage: 90
 
-optimizer:                           # Added optimizer section
+optimizer:
   type: "adamw"
-  eps: 1e-8
+  eps: 0.00000001
   betas: [0.9, 0.999]
-  fused: false                       # Set to true if using newer CUDA versions
-  gradient_centralization: true      # Helps with gradient stability
+  fused: true
+  gradient_centralization: true
 
 extras:
-  use_gradient_checkpointing: true   # Memory efficient backprop
-  activation_checkpointing: true     # Additional memory savings
-  fp16_opt_level: "O1"               # Conservative mixed precision
-  deterministic_algorithms: true     # For reproducibility
-  detect_anomaly: true               # Enable anomaly detection during initial runs
-  empty_cuda_cache_freq: 10          # Clear CUDA cache periodically
+  use_gradient_checkpointing: true
+  activation_checkpointing: true
+  fp16_opt_level: "O1"
+  deterministic_algorithms: false
+  detect_anomaly: true
+  empty_cuda_cache_freq: 10
