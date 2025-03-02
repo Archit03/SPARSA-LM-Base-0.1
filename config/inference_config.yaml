@@ -1,10 +1,14 @@
 generation:
-  max_length: 20
-  temperature: 1.0   # Lowered temperature for more focused, coherent output
-  top_k: 50          # Restricted to the top 50 tokens for sampling
-  top_p: 0.9         # Nucleus sampling to cover 90% of the probability mass
-  repetition_penalty: 1.2
+  max_length: 128          # Increased from 20 for more complete generations
+  temperature: 0.65        # Slightly lower for more focused outputs
+  top_k: 50                # Increased slightly for better vocabulary diversity
+  top_p: 0.9               # Slightly adjusted for better quality
+  repetition_penalty: 1.25 # Slightly increased to reduce repetition
   do_sample: true
+  num_beams: 4             # Added beam search for higher quality outputs
+  no_repeat_ngram_size: 3  # Added to prevent repeating phrases
+  length_penalty: 1.0      # Added to prevent overly short outputs
+  early_stopping: true     # Added for efficiency in beam search
 
 inference:
   model_path: model/best_LuminaLM_model.pt
@@ -29,19 +33,22 @@ memory_monitor:
   monitor_gpu: true
 
 model:
-  hidden_dim: 128                   # Reduced for quick training
-  num_layers: 2                      # Fewer layers for speed
-  num_heads: 4                      # Reduced to balance
-  ff_dim: 256                        # 2x hidden_dim
-  dropout: 0.1
+  hidden_dim: 128
+  num_layers: 2
+  num_heads: 4
+  ff_dim: 256
+  dropout: 0.2
   vocab_size: 8000
   max_seq_len: 64
   use_checkpointing: true
   activation: "gelu"
   tie_embeddings: true
-  window_size: 4
-  global_tokens: 1
+  window_size: 16
+  global_tokens: 4
   use_reentrant: false
+  initializer_range: 0.02
+  use_layer_norm: true
+  normalize_before: true
 
 tokenizer:
   add_special_tokens: true
