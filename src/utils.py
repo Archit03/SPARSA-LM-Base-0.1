@@ -65,9 +65,14 @@ def save_checkpoint(model, optimizer, epoch, loss, path="checkpoint.pth"):
 def load_checkpoint(path, model, optimizer=None, scheduler=None):
     """Load model checkpoint"""
     if not os.path.exists(path):
-        raise FileNotFoundError(f"checkpoint not found at {path}")
+        raise FileNotFoundError(f"Checkpoint not found at {path}")
     
-    checkpoint = torch.load(path, map_location=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    checkpoint = torch.load(
+        path,
+        map_location=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        weights_only=True
+    )
+    
     model.load_state_dict(checkpoint["model_state_dict"])
     logging.info(f"Model loaded from {path}")
 
@@ -79,8 +84,10 @@ def load_checkpoint(path, model, optimizer=None, scheduler=None):
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         logging.info("Scheduler loaded")
     
+    # Just return the epoch (an integer). Everything else is already loaded in-place.
     epoch = checkpoint.get("epoch", 0)
-    return model, optimizer, scheduler, epoch
+    return epoch
+
 
 def count_parameters(model):
     """Count number of trainable parameters in a model"""
