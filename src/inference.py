@@ -10,6 +10,7 @@ from transformers import PreTrainedTokenizerFast
 import io
 import sys
 import json
+import math  # NEW: for exp()
 
 ###############################################################################
 # 0. ADVANCED LOGGING SETUP
@@ -284,12 +285,21 @@ def setup_model_for_inference(config: Dict[str, Any]):
         load_start = time.time()
         model.load_state_dict(checkpoint['model_state_dict'])
         logging.debug(f"State dict loaded in {time.time() - load_start:.2f} seconds")
+
         if 'epoch' in checkpoint:
             logging.info(f"Checkpoint from epoch: {checkpoint['epoch']}")
+        # NEW: Log final training/validation loss & perplexity (if stored in checkpoint)
         if 'train_loss' in checkpoint:
-            logging.info(f"Final training loss: {checkpoint['train_loss']}")
+            train_loss = checkpoint['train_loss']
+            logging.info(f"Final training loss: {train_loss:.4f}")
+            train_ppl = math.exp(train_loss)
+            logging.info(f"Final training perplexity: {train_ppl:.2f}")
         if 'val_loss' in checkpoint:
-            logging.info(f"Final validation loss: {checkpoint['val_loss']}")
+            val_loss = checkpoint['val_loss']
+            logging.info(f"Final validation loss: {val_loss:.4f}")
+            val_ppl = math.exp(val_loss)
+            logging.info(f"Final validation perplexity: {val_ppl:.2f}")
+
         if 'timestamp' in checkpoint:
             logging.info(f"Checkpoint timestamp: {checkpoint['timestamp']}")
         print(f"✅ Model loaded from {checkpoint_path}")
@@ -349,7 +359,10 @@ def generate_text(
     length_penalty = length_penalty or gen_cfg.get('length_penalty', 1.0)
     early_stopping = early_stopping if early_stopping is not None else gen_cfg.get('early_stopping', True)
     
-    logging.info(f"Generation parameters: max_length={max_length}, temperature={temperature}, top_k={top_k}, top_p={top_p}, repetition_penalty={repetition_penalty}, num_beams={num_beams}, no_repeat_ngram_size={no_repeat_ngram_size}, length_penalty={length_penalty}, early_stopping={early_stopping}")
+    logging.info(f"Generation parameters: max_length={max_length}, temperature={temperature}, "
+                 f"top_k={top_k}, top_p={top_p}, repetition_penalty={repetition_penalty}, "
+                 f"num_beams={num_beams}, no_repeat_ngram_size={no_repeat_ngram_size}, "
+                 f"length_penalty={length_penalty}, early_stopping={early_stopping}")
 
     device = next(model.parameters()).device
     logging.debug(f"Using device: {device}")

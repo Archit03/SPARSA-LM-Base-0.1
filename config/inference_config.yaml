@@ -1,14 +1,14 @@
 generation:
-  max_length: 128          # Increased from 20 for more complete generations
-  temperature: 0.65        # Slightly lower for more focused outputs
-  top_k: 50                # Increased slightly for better vocabulary diversity
-  top_p: 0.9               # Slightly adjusted for better quality
-  repetition_penalty: 1.25 # Slightly increased to reduce repetition
+  max_length: 128
+  temperature: 0.6
+  top_k: 50
+  top_p: 0.9
+  repetition_penalty: 3.25
   do_sample: true
-  num_beams: 4             # Added beam search for higher quality outputs
-  no_repeat_ngram_size: 3  # Added to prevent repeating phrases
-  length_penalty: 1.0      # Added to prevent overly short outputs
-  early_stopping: true     # Added for efficiency in beam search
+  num_beams: 8
+  no_repeat_ngram_size: 10
+  length_penalty: 1.0
+  early_stopping: true
 
 inference:
   model_path: model/best_LuminaLM_model.pt
