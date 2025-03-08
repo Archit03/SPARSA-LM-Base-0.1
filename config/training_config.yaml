@@ -2,7 +2,7 @@ training:
   device: "cuda"
   epochs: 20
   batch_size: 128
-  learning_rate: 0.000005             # Reduced learning rate to improve stability
+  learning_rate: 0.00005             # Reduced learning rate to improve stability
   weight_decay: 0.01
   max_grad_norm: 0.05                 # Reduced from 0.1 to prevent extreme gradients
   gradient_accumulation_steps: 32
