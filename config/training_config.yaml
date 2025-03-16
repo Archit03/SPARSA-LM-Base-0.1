@@ -9,7 +9,7 @@ training:
   seed: 42
   resume_from_checkpoint: "model/latest_LuminaLM_model_checkpoint.pt"  # Now resuming from latest checkpoint
   checkpoint_dir: "model"
-  checkpoint_save_frequency: 2
+  checkpoint_save_frequency: 1
   scheduler_type: "linear_warmup"
   lr_scheduler_kwargs:
     warmup_steps: 2000                # Reduced warmup steps for resuming
