@@ -1,7 +1,7 @@
 # Welcome to SPARSA-LM
 
 ## About SPARSA-LM
-**SPARSA-LM** (Sparse Attention Lumina Language Model) is an advanced Large Language Model (LLM) designed to push the boundaries of artificial intelligence by integrating cutting-edge deep learning techniques, multimodal capabilities, and domain-specific expertise. SPARSA-LM is crafted to address complex challenges in science, medicine, technology, and research.
+**SPARSA-LM** (Sparse Attention Lumina Language Model) is a Small Language Model (SLM) designed to push the boundaries of artificial intelligence by integrating cutting-edge deep learning techniques, multimodal capabilities, and domain-specific expertise. SPARSA-LM is crafted to address complex challenges in science, medicine, technology, and research.
 
 ---
 
@@ -51,28 +51,18 @@ To shape a future where AI serves as a driving force for innovation, collaborati
    pip install -r requirements.txt
    ```
 
-3. Set up the environment:
-   ```bash
-   python setup.py install
-   ```
-
-### Example Usage
-#### Preprocessing Data
-Use the preprocessing script to prepare datasets:
-```bash
-python scripts/preprocess_data.py --config config/dataset_config.yaml
-```
+### Usage
 
 #### Training the Model
 Run the training script to train SPARSA-LM:
 ```bash
-python scripts/train_model.py --config config/training_config.yaml
+python scripts/training.py
 ```
 
 #### Generating Text
 Generate text using the trained model:
 ```bash
-python scripts/generate_text.py --prompt "Your input text here"
+python src\inference.py
 ```
 
 ---
@@ -90,7 +80,7 @@ This project is licensed under the Proprietary License. See the `EllanorAI LICEN
 ## Contact
 For questions or collaboration, reach out to:
 - **Email:** [email](architsood@ellanorai.org)
-- **Website:** [Website](https://ellanorai.vercel.app)
+- **Website:** [Website](https://ellanorai.org)
 
 ---
 
