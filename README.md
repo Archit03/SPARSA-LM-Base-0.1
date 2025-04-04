@@ -62,7 +62,7 @@ python scripts/training.py
 #### Generating Text
 Generate text using the trained model:
 ```bash
-python src\inference.py
+python src/inference.py
 ```
 
 ---
