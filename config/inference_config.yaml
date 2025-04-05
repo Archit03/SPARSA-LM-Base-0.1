@@ -1,13 +1,13 @@
 generation:
-  max_length: 128
-  temperature: 0.85
-  top_k: 80
-  top_p: 0.9
-  repetition_penalty: 3.25
+  max_length: 128           # Reduced from 128 - smaller models struggle with longer sequences
+  temperature: 0.6         # Lower temperature for more focused outputs
+  top_k: 40                # More restrictive token selection
+  top_p: 0.85              # Slightly more restrictive nucleus sampling
+  repetition_penalty: 1.5  # Less aggressive repetition prevention
   do_sample: true
-  num_beams: 12
-  no_repeat_ngram_size: 8
-  length_penalty: 2.25
+  num_beams: 4             # Fewer beams for small models
+  no_repeat_ngram_size: 3  # Smaller n-gram restriction
+  length_penalty: 1.0      # Neutral length penalty
   early_stopping: true
 
 inference:

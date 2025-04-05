@@ -1,6 +1,6 @@
 training:
   device: "cuda"
-  epochs: 20
+  epochs: 25
   batch_size: 128
   learning_rate: 0.00005             # Reduced learning rate to improve stability
   weight_decay: 0.01
@@ -48,7 +48,7 @@ model:
   num_layers: 2
   num_heads: 4
   ff_dim: 256
-  dropout: 0.2
+  dropout: 0.1
   vocab_size: 8000
   max_seq_len: 64
   use_checkpointing: true

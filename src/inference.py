@@ -302,7 +302,7 @@ def setup_model_for_inference(config: Dict[str, Any]):
 
         if 'timestamp' in checkpoint:
             logging.info(f"Checkpoint timestamp: {checkpoint['timestamp']}")
-        print(f"✅ Model loaded from {checkpoint_path}")
+        print(f"Model loaded from {checkpoint_path}")
         logging.info("Model checkpoint loaded successfully")
     except Exception as e:
         logging.error(f"Error loading model checkpoint: {e}", exc_info=True)
@@ -522,15 +522,15 @@ def main():
             raise RuntimeError("Tokenizer verification failed")
         logging.info("System initialization complete")
         logging.info(f"Total startup time: {time.time() - start_time:.2f} seconds")
-        print("\n🔥 Welcome to LuminaLM Text Generation! 🔥")
+        print("\nWelcome to LuminaLM Text Generation! 🔥")
         print("Type your prompt and press Enter to generate text.")
         print("Type 'exit' to quit.\n")
         while True:
-            prompt = input("💬 Enter prompt: ").strip()
+            prompt = input("Enter prompt: ").strip()
             logging.info(f"User prompt: '{prompt[:50]}{'...' if len(prompt) > 50 else ''}'")
             if prompt.lower() == 'exit':
                 logging.info("User requested exit")
-                print("\n👋 Goodbye!")
+                print("\nGoodbye!")
                 break
             try:
                 logging.info("Starting text generation")
@@ -545,18 +545,18 @@ def main():
                 logging.info(f"Text generation completed in {gen_time:.2f} seconds")
                 logging.info(f"Generated {len(output)} characters")
                 logging.debug(f"Generated output: '{output[:100]}{'...' if len(output) > 100 else ''}'")
-                print(f"\n📝 Generated Output:\n{'-'*50}")
+                print(f"\nGenerated Output:\n{'-'*50}")
                 print(output)
                 print('-'*50)
             except Exception as e:
                 logging.error(f"Generation error: {str(e)}", exc_info=True)
-                print(f"⚠️ Error during generation: {str(e)}")
+                print(f"Error during generation: {str(e)}")
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt received, exiting")
-        print("\n👋 Goodbye!")
+        print("\nGoodbye!")
     except Exception as e:
         logging.error(f"Fatal error: {str(e)}", exc_info=True)
-        print(f"⚠️ Fatal error: {str(e)}")
+        print(f"Fatal error: {str(e)}")
         raise
     finally:
         logging.info("=" * 80)

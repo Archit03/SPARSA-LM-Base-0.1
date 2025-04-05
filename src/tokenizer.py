@@ -202,7 +202,7 @@ class TokenizationUtilities:
     def generate_masked_lm_inputs(
         input_ids: Tensor,
         mask_probability: float = 0.15,
-        mask_token_id: int = 103,
+        mask_token_id: int = 4,
         special_token_ids: Optional[List[int]] = None,
         vocab_size: Optional[int] = None
     ) -> Tuple[Tensor, Tensor, Tensor]:
