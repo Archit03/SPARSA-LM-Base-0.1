@@ -56,7 +56,7 @@ To shape a future where AI serves as a driving force for innovation, collaborati
 #### Training the Model
 Run the training script to train SPARSA-LM:
 ```bash
-python scripts/training.py
+python src/training.py
 ```
 
 #### Generating Text
