@@ -42,7 +42,7 @@ To shape a future where AI serves as a driving force for innovation, collaborati
 ### Installation
 1. Clone the repository:
    ```bash
-   git clone hhttps://github.com/Archit03/SPARSA-LM-Base-0.1
+   git clone https://github.com/Archit03/SPARSA-LM-Base-0.1
    cd SPARSA-LM
    ```
 
