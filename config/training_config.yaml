@@ -1,77 +1,97 @@
+# config/squad_training_config.yaml
+# Configuration for training SPARSA-LM on SQuAD dataset
+
 training:
   device: "cuda"
-  epochs: 25
-  batch_size: 128
-  learning_rate: 0.00005             # Reduced learning rate to improve stability
+  epochs: 10
+  batch_size: 16  # Adjust based on GPU memory
+  learning_rate: 0.00003
   weight_decay: 0.01
-  max_grad_norm: 0.05                 # Reduced from 0.1 to prevent extreme gradients
-  gradient_accumulation_steps: 32
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 4
   seed: 42
-  resume_from_checkpoint: "model/latest_LuminaLM_model_checkpoint.pt"  # Now resuming from latest checkpoint
-  checkpoint_dir: "model"
+  resume_from_checkpoint: null
+  checkpoint_dir: "model/squad"
   checkpoint_save_frequency: 1
-  scheduler_type: "linear_warmup"
+  scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs:
-    warmup_steps: 2000                # Reduced warmup steps for resuming
-    min_lr: 0.0000001
-  log_every_n_steps: 10
+    min_lr: 0.000001
+  log_every_n_steps: 50
   eval_every_n_epochs: 1
-  early_stopping_patience: 5
+  early_stopping_patience: 3
   use_mixed_precision: true
-  amp_scaler_init_scale: 4            # Reduced from 8 to improve stability
-  max_grad_value: 0.05                # Reduced to match max_grad_norm
-  use_noise_injection: true  
-  noise_type: "mask"
-  noise_prob: 0.01
+  amp_scaler_init_scale: 8192
+  max_grad_value: 10.0
+  
+  # QA-specific settings
+  use_noise_injection: false  # Disable noise for QA tasks
+  evaluate_metrics: true  # Enable QA metrics (EM, F1)
 
 dataset:
-  train_dataset: "local_data"
-  max_seq_len: 64
+  type: "squad"
+  version: "v2.0"  # or "v1.1"
+  max_seq_len: 512  # For context + question
+  max_answer_len: 128
+  train_subsample: null  # Set to small number for testing (e.g., 1000)
+  val_subsample: null    # Set to small number for testing (e.g., 100)
+  cache_dir: "./cache/squad"
   num_workers: 4
   shuffle: true
   pin_memory: true
   prefetch_factor: 2
   persistent_workers: true
-  preprocessing:
-    lowercase: true
-    min_length: 5
-  split:
-    test_size: 0.1
-    random_state: 42
 
 tokenizer:
   path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer"
   add_special_tokens: true
+  
+  # Additional tokens for QA
+  qa_tokens:
+    - "[QUESTION]"
+    - "[CONTEXT]"
+    - "[ANSWER]"
 
 model:
-  hidden_dim: 128
-  num_layers: 2
-  num_heads: 4
-  ff_dim: 256
+  hidden_dim: 256  # Increased for QA complexity
+  num_layers: 6    # Deeper model for better comprehension
+  num_heads: 8
+  ff_dim: 1024
   dropout: 0.1
-  vocab_size: 8000
-  max_seq_len: 64
+  vocab_size: 32000  # Increased vocab for better coverage
+  max_seq_len: 512
+  max_answer_len: 128
   use_checkpointing: true
   activation: "gelu"
   tie_embeddings: true
-  window_size: 16
-  global_tokens: 4
+  window_size: 32  # Larger window for context understanding
+  global_tokens: 8  # More global tokens for QA
   use_reentrant: false
   initializer_range: 0.02
   use_layer_norm: true
   normalize_before: true
+  
+  # QA-specific architecture options
+  use_cross_attention: true  # Enable cross-attention for QA
+  answer_pooling: "first"  # How to pool answer representations
 
 logging:
-  log_dir: "SPARSA-LM-Base 0.1/logs_test"
+  log_dir: "logs/squad"
   use_wandb: true
-  log_gradients: true
+  wandb_project: "SPARSA-LM-SQuAD"
+  wandb_entity: null
+  log_gradients: false
   log_model_weights: false
   log_train_steps: true
   log_frequency: 100
+  
+  # QA-specific logging
+  log_qa_metrics: true
+  log_sample_predictions: true
+  num_samples_to_log: 5
 
 memory_monitor:
   enabled: true
-  log_frequency: 10
+  log_frequency: 50
   monitor_gpu: true
   monitor_cpu: true
   empty_cache: true
@@ -82,12 +102,17 @@ optimizer:
   eps: 0.00000001
   betas: [0.9, 0.999]
   fused: true
-  gradient_centralization: true
+  gradient_centralization: false
 
 extras:
   use_gradient_checkpointing: true
   activation_checkpointing: true
   fp16_opt_level: "O1"
   deterministic_algorithms: false
-  detect_anomaly: true
+  detect_anomaly: false
   empty_cuda_cache_freq: 10
+  
+  # QA evaluation settings
+  eval_beam_size: 4
+  eval_length_penalty: 1.0
+  eval_no_repeat_ngram_size: 3
