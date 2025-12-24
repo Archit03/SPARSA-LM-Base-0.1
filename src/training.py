@@ -1,928 +1,668 @@
+"""
+SPARSA-LM Multi-GPU Training with DeepSpeed ZeRO
+
+Features:
+- DeepSpeed ZeRO-2/ZeRO-3 optimization
+- Multi-GPU distributed training (4x L4 24GB)
+- Mixed precision training (BF16)
+- Gradient checkpointing
+- Automatic batch size scaling
+- WandB integration
+
+This code belongs to EllanorAI and is licensed under the EllanorAI Proprietary License.
+"""
+
 import os
+import sys
 import yaml
+import json
 import logging
-import wandb
+import time
+import math
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, Tuple, List
+from pathlib import Path
+
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, DistributedSampler
 import numpy as np
-from torch.utils.data import DataLoader
-from torch.nn.utils import clip_grad_norm_
+
+# Optional DeepSpeed import
+try:
+    import deepspeed
+    from deepspeed import DeepSpeedEngine
+    from deepspeed.runtime.zero.stage3 import estimate_zero3_model_states_mem_needs_all_live
+    DEEPSPEED_AVAILABLE = True
+except ImportError:
+    DEEPSPEED_AVAILABLE = False
+    logging.warning("DeepSpeed not available. Install with: pip install deepspeed")
+
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
+try:
+    from transformers import AutoTokenizer, get_scheduler
+    HF_AVAILABLE = True
+except ImportError:
+    HF_AVAILABLE = False
+
 from tqdm import tqdm
-from transformers import PreTrainedTokenizerFast
-from typing import Dict, Any, Optional, Tuple
-import transformers
-import traceback
-from dataset import DatasetProcessor, TextDataset
-from model import Transformer, TransformerConfig
-from utils import setup_logging, load_checkpoint, set_seed, MemoryMonitor
-from torch.amp import GradScaler
-import optuna
-from sklearn.model_selection import train_test_split
 
-# Ensures reproducible CuBLAS behavior
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+# Import local modules
+from model import SPARSALM, SPARSAConfig, create_model
+from dataset import (
+    StreamingPretrainDataset,
+    InstructionDataset,
+    DatasetConfig,
+    create_dataloader,
+    get_tokenizer,
+)
 
 
-# ----------------------------------------------------------------------
-# Debugging Utilities
-# ----------------------------------------------------------------------
-def debug_tensor_values(tensor: torch.Tensor, name: str, logger: logging.Logger) -> bool:
-    try:
-        if tensor is None:
-            logger.error(f"{name} is None")
-            return False
-        stats = {
-            "shape": tensor.shape,
-            "dtype": tensor.dtype,
-            "device": str(tensor.device),
-            "min": tensor.min().item(),
-            "max": tensor.max().item(),
-            "mean": tensor.float().mean().item(),
-            "num_nan": torch.isnan(tensor).sum().item(),
-            "num_inf": torch.isinf(tensor).sum().item()
-        }
-        logger.info(f"{name} stats: {stats}")
-        return True
-    except Exception as e:
-        logger.error(f"Error analyzing {name}: {e}")
-        return False
+@dataclass
+class TrainingConfig:
+    """Training configuration."""
 
-def validate_model_outputs(outputs: torch.Tensor, labels: torch.Tensor, vocab_size: int, logger: logging.Logger) -> bool:
-    try:
-        if outputs.dim() != labels.dim() + 1:
-            logger.error(f"Dimension mismatch: outputs={outputs.shape}, labels={labels.shape}")
-            return False
-        if not debug_tensor_values(outputs, "outputs", logger):
-            return False
-        if not debug_tensor_values(labels, "labels", logger):
-            return False
-        flat_labels = labels.view(-1)
+    # Basic settings
+    epochs: int = 100
+    batch_size: int = 4
+    gradient_accumulation_steps: int = 8
+    learning_rate: float = 3e-4
+    weight_decay: float = 0.1
+    max_grad_norm: float = 1.0
+    warmup_ratio: float = 0.03
 
-        # Check for invalid labels outside the vocab range (excluding the ignore index -100)
-        invalid_labels = (flat_labels >= vocab_size) & (flat_labels != -100)
-        if invalid_labels.any():
-            invalid_indices = torch.where(invalid_labels)[0]
-            invalid_values = flat_labels[invalid_labels]
-            logger.error(f"Invalid label values (>= vocab_size): {invalid_values.cpu().tolist()}")
-            logger.error(f"Positions with invalid values: {invalid_indices.cpu().tolist()}")
-            logger.error(f"Vocabulary size: {vocab_size}")
-            return False
+    # Model settings
+    model_path: Optional[str] = None
+    tokenizer_path: str = "tokenizer"
+    max_seq_len: int = 2048
 
-        # Check for negative labels (other than -100)
-        negative_labels = (flat_labels < 0) & (flat_labels != -100)
-        if negative_labels.any():
-            neg_indices = torch.where(negative_labels)[0]
-            neg_values = flat_labels[negative_labels]
-            logger.error(f"Negative label values (not -100): {neg_values.cpu().tolist()}")
-            logger.error(f"Positions with negative values: {neg_indices.cpu().tolist()}")
-            return False
+    # DeepSpeed settings
+    use_deepspeed: bool = True
+    deepspeed_config: str = "config/deepspeed_config.json"
+    zero_stage: int = 2
 
-        return True
-    except Exception as e:
-        logger.error(f"Validation error: {e}")
-        return False
+    # Hardware settings
+    device: str = "cuda"
+    bf16: bool = True
+    fp16: bool = False
 
-def debug_loss_inputs(outputs: torch.Tensor, labels: torch.Tensor, vocab_size: int, logger: logging.Logger) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-    """
-    Flattens outputs and labels, then checks if they match dimensionally
-    and are valid for loss computation.
-    """
-    try:
-        flat_outputs = outputs.view(-1, outputs.size(-1))
-        flat_labels = labels.view(-1)
-        if flat_outputs.size(0) != flat_labels.size(0):
-            logger.error(f"Size mismatch after flattening: outputs={flat_outputs.shape}, labels={flat_labels.shape}")
-            return None, None
-        if flat_outputs.size(1) != vocab_size:
-            logger.error(f"Output size mismatch: got {flat_outputs.size(1)}, expected {vocab_size}")
-            return None, None
-        if not validate_model_outputs(flat_outputs, flat_labels, vocab_size, logger):
-            return None, None
-        return flat_outputs, flat_labels
-    except Exception as e:
-        logger.error(f"Error in debug_loss_inputs: {e}")
-        return None, None
+    # Checkpointing
+    checkpoint_dir: str = "checkpoints/sparsa-360m"
+    save_steps: int = 1000
+    eval_steps: int = 500
+    logging_steps: int = 10
+
+    # Distributed settings
+    local_rank: int = -1
+    world_size: int = 1
+
+    # Logging
+    use_wandb: bool = True
+    wandb_project: str = "SPARSA-LM-360M"
+
+    # Early stopping
+    early_stopping_patience: int = 5
+
+    # Seed
+    seed: int = 42
 
 
-# ----------------------------------------------------------------------
-# Configuration Error Exception
-# ----------------------------------------------------------------------
-class ConfigurationError(Exception):
-    """Custom exception for configuration-related errors."""
-    pass
+def setup_logging(log_dir: str, rank: int = 0) -> logging.Logger:
+    """Setup logging with file and console handlers."""
+    os.makedirs(log_dir, exist_ok=True)
+
+    logger = logging.getLogger("sparsa_training")
+    logger.setLevel(logging.INFO if rank == 0 else logging.WARNING)
+
+    # File handler
+    fh = logging.FileHandler(os.path.join(log_dir, f"training_rank{rank}.log"))
+    fh.setLevel(logging.DEBUG)
+
+    # Console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO if rank == 0 else logging.WARNING)
+
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
+    return logger
 
 
-# ----------------------------------------------------------------------
-# Trainer Class
-# ----------------------------------------------------------------------
-class Trainer:
-    def __init__(self, training_config: Dict, data_config: Dict):
-        """
-        Initializes the Trainer with configuration dictionaries.
-        """
-        try:
-            self._validate_config(training_config)
-            self.config = training_config
-            self.data_config = data_config
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-            # Set deterministic algorithms and anomaly detection if enabled
-            if self.config.get("extras", {}).get("deterministic_algorithms", False):
-                torch.use_deterministic_algorithms(True)
-                torch.backends.cudnn.deterministic = True
 
-            if self.config.get("extras", {}).get("detect_anomaly", False):
-                torch.autograd.set_detect_anomaly(True)
+def get_optimizer_grouped_params(
+    model: nn.Module,
+    weight_decay: float,
+    learning_rate: float,
+) -> List[Dict]:
+    """Get optimizer param groups with weight decay separation."""
+    no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight", "norm.weight"]
 
-            # Early stopping setup
-            self.best_metric = float('inf')
-            self.stopping_counter = 0
-            self.early_stopping_patience = self.config['training'].get('early_stopping_patience', 3)
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters()
+                      if not any(nd in n for nd in no_decay) and p.requires_grad],
+            "weight_decay": weight_decay,
+            "lr": learning_rate,
+        },
+        {
+            "params": [p for n, p in model.named_parameters()
+                      if any(nd in n for nd in no_decay) and p.requires_grad],
+            "weight_decay": 0.0,
+            "lr": learning_rate,
+        },
+    ]
 
-            # Setup logging
-            self.logger = setup_logging(self.config['logging']['log_dir'], name='LuminaLM_trainer')
+    return optimizer_grouped_parameters
 
-            # Initialize W&B if enabled
-            if self.config['logging'].get('use_wandb', True):
-                wandb.init(project=self.config['logging'].get('wandb_project', 'LuminaLM-training'),
-                           config=self.config)
-                self.use_wandb = True
-            else:
-                self.use_wandb = False
 
-            # Set random seed
-            set_seed(self.config['training']['seed'])
+class DeepSpeedTrainer:
+    """Trainer with DeepSpeed integration for multi-GPU training."""
 
-            # ------------------ Tokenizer Loading & Special Tokens Setup ------------------
-            tokenizer_path = self.config['tokenizer']['path']
-            if os.path.isfile(tokenizer_path):
-                tokenizer_dir = os.path.dirname(tokenizer_path)
-            else:
-                tokenizer_dir = tokenizer_path
+    def __init__(
+        self,
+        config: TrainingConfig,
+        model_config: Dict[str, Any],
+        data_config: Optional[DatasetConfig] = None,
+    ):
+        self.config = config
+        self.model_config = model_config
+        self.data_config = data_config or DatasetConfig(max_seq_len=config.max_seq_len)
 
-            self.tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_dir)
-            self.logger.info(f"Tokenizer loaded with vocab size: {self.tokenizer.vocab_size}")
+        # Setup distributed training
+        self._setup_distributed()
 
-            expected_special_tokens = {
-                "pad_token": "[PAD]",
-                "unk_token": "[UNK]",
-                "cls_token": "[CLS]",
-                "sep_token": "[SEP]",
-                "mask_token": "[MASK]",
-                "bos_token": "[BOS]",
-                "eos_token": "[EOS]"
-            }
-
-            special_mapping = {}
-            for key, token in expected_special_tokens.items():
-                if token in self.tokenizer.all_special_tokens:
-                    token_id = self.tokenizer.convert_tokens_to_ids(token)
-                else:
-                    token_id = None
-                special_mapping[key] = (token, token_id)
-            self.logger.info(f"Special tokens mapping: {special_mapping}")
-
-            missing_tokens = {key: token for key, (token, token_id) in special_mapping.items() if token_id is None}
-            if missing_tokens:
-                self.logger.info(f"Missing special tokens detected: {missing_tokens}. Adding them...")
-                self.tokenizer.add_special_tokens(missing_tokens)
-                vocab = self.tokenizer.get_vocab()
-                for key, token in expected_special_tokens.items():
-                    token_id = vocab.get(token)
-                    special_mapping[key] = (token, token_id)
-                self.logger.info(f"Special tokens mapping (after adding missing tokens): {special_mapping}")
-            else:
-                self.logger.info("All special tokens are present with IDs.")
-
-            # Set these tokens so the model is consistent about indexing
-            self.tokenizer.pad_token = expected_special_tokens["pad_token"]
-            self.tokenizer.unk_token = expected_special_tokens["unk_token"]
-            self.tokenizer.cls_token = expected_special_tokens["cls_token"]
-            self.tokenizer.sep_token = expected_special_tokens["sep_token"]
-            self.tokenizer.mask_token = expected_special_tokens["mask_token"]
-            self.tokenizer.bos_token = expected_special_tokens["bos_token"]
-            self.tokenizer.eos_token = expected_special_tokens["eos_token"]
-
-            # Save the tokenizer with any newly-added tokens
-            self.tokenizer.save_pretrained(tokenizer_dir)
-            # ------------------------------------------------------------------------------
-
-            # ------------------------ Dataset / DataLoader Setup -------------------------
-            datasets = self.data_config.get('datasets', [])
-            if not isinstance(datasets, list):
-                raise ValueError("'datasets' must be a list.")
-
-            source_dir = next(
-                (d.get('config', {}).get('source_dir') for d in datasets if d.get('name') == self.config['dataset']['train_dataset']),
-                None
-            )
-            if not source_dir or not os.path.exists(source_dir):
-                raise ValueError(f"Invalid source directory: {source_dir}")
-
-            split_config = self.config['dataset'].get('split', {'test_size': 0.2, 'random_state': 42})
-            preprocessing_config = self.config['dataset'].get('preprocessing', {})
-
-            self.dataset_processor = DatasetProcessor(
-                source_dir=source_dir,
-                split=split_config,
-                preprocessing_config=preprocessing_config
-            )
-
-            max_length = self.config['dataset']['max_seq_len']
-            self.train_dataset = self.dataset_processor.get_train_dataset(
-                tokenizer=self.tokenizer,
-                max_length=max_length
-            )
-            self.val_dataset = self.dataset_processor.get_val_dataset(
-                tokenizer=self.tokenizer,
-                max_length=max_length
-            )
-
-            self.device = torch.device(
-                self.config['training'].get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
-            )
-
-            self.train_loader = DataLoader(
-                dataset=self.train_dataset,
-                batch_size=self.config['training']['batch_size'],
-                shuffle=True,
-                num_workers=self.config['training'].get('num_workers', 1),
-                pin_memory=(self.device.type == "cuda"),
-                collate_fn=TextDataset.collate_fn,
-                drop_last=self.config['training'].get('drop_last', False)
-            )
-            self.val_loader = DataLoader(
-                dataset=self.val_dataset,
-                batch_size=self.config['training']['batch_size'],
-                shuffle=False,
-                num_workers=self.config['training'].get('num_workers', 1),
-                pin_memory=(self.device.type == "cuda"),
-                collate_fn=TextDataset.collate_fn,
-                drop_last=self.config['training'].get('drop_last', False)
-            )
-            # ------------------------------------------------------------------------------
-
-            # --------------- Scheduler & Gradient Accumulation Setup ---------------------
-            scheduler_type = self.config["training"].get("scheduler_type", "linear")
-            lr_scheduler_kwargs = self.config["training"].get("lr_scheduler_kwargs", {})
-
-            # For certain schedulers, enforce 'min_lr' if not specified
-            if scheduler_type in ["cosine_with_min_lr", "cosine_warmup"]:
-                if 'min_lr' not in lr_scheduler_kwargs and 'min_lr_rate' not in lr_scheduler_kwargs:
-                    self.logger.warning("`min_lr` not found in `lr_scheduler_kwargs`, using default 1e-6")
-                    lr_scheduler_kwargs['min_lr'] = 1e-6
-
-            self.enable_gradient_accumulation = self.config['training'].get('enable_gradient_accumulation', True)
-            self.gradient_accumulation_steps = (
-                self.config['training'].get('gradient_accumulation_steps', 1)
-                if self.enable_gradient_accumulation
-                else 1
-            )
-            # ------------------------------------------------------------------------------
-
-            # ---------------------------- Model Configuration -----------------------------
-            model_config = TransformerConfig(
-                d_model=self.config['model']['hidden_dim'],
-                num_heads=self.config['model']['num_heads'],
-                window_size=self.config['model'].get('window_size', 4),
-                global_tokens=self.config['model'].get('global_tokens', 0),
-                d_ff=self.config['model']['ff_dim'],
-                num_layers=self.config['model']['num_layers'],
-                dropout=self.config['model']['dropout'],
-                max_seq_len=self.config['model']['max_seq_len'],
-                activation=self.config['model'].get('activation', 'gelu'),
-                use_rope=self.config['model'].get('use_rope', True),
-                normalize_before=self.config['model'].get('normalize_before', True),
-                vocab_size=self.config['model']['vocab_size'],
-                tie_embeddings=self.config['model'].get('tie_embeddings', False),
-                scheduler_type=scheduler_type,
-                learning_rate=self.config['training']['learning_rate'],
-                weight_decay=self.config['training']['weight_decay'],
-                warmup_ratio=self.config['training'].get('warmup_ratio', 0.1),
-                use_mixed_precision=self.config['training'].get('use_mixed_precision', True),
-                max_grad_norm=self.config['training'].get('max_grad_norm', 1.0),
-                pad_token_id=self.tokenizer.pad_token_id,
-                l2_reg=self.config['training'].get('l2_reg', 0.0),
-                use_checkpointing=self.config['model'].get('use_checkpointing', False),
-                use_reentrant=self.config['model'].get('use_reentrant', False),
-                noise_type=self.config['training'].get('noise_type', 'mask'),
-                noise_prob=self.config['training'].get('noise_prob', 0.3)
-            )
-
-            self.model = Transformer(model_config).to(self.device)
-
-            # Initialize weights
-            def _init_weights(module):
-                if isinstance(module, (torch.nn.Linear, torch.nn.Embedding)):
-                    torch.nn.init.normal_(
-                        module.weight,
-                        mean=0.0,
-                        std=self.config['model'].get('initializer_range', 0.02)
-                    )
-                    if isinstance(module, torch.nn.Linear) and module.bias is not None:
-                        torch.nn.init.zeros_(module.bias)
-                elif isinstance(module, torch.nn.LayerNorm):
-                    torch.nn.init.ones_(module.weight)
-                    torch.nn.init.zeros_(module.bias)
-
-            self.model.apply(_init_weights)
-            # ------------------------------------------------------------------------------
-
-            # --------------------- Optimizer / Scheduler / Criterion ---------------------
-            self.optimizer = self._configure_optimizer()
-            num_training_steps = len(self.train_loader) * self.config['training']['epochs']
-            self.scheduler = self._configure_scheduler(self.optimizer, self.config['training'], num_training_steps)
-
-            # Cross-entropy ignoring the PAD index
-            self.criterion = torch.nn.CrossEntropyLoss(
-                ignore_index=self.tokenizer.pad_token_id,
-                label_smoothing=0.0
-            )
-
-            # Memory monitoring
-            self.memory_monitor = MemoryMonitor()
-
-            # Check if resuming
-            self.start_epoch = 0
-            if self.config['training'].get('resume_from_checkpoint'):
-                # load_checkpoint is assumed to return just the epoch integer
-                self.start_epoch = load_checkpoint(
-                    self.config['training']['resume_from_checkpoint'],
-                    self.model,
-                    self.optimizer,
-                    self.scheduler
-                )
-
-            # Amp GradScaler
-            self.scaler = GradScaler(enabled=self.config['training'].get('use_mixed_precision', True))
-
-            # Empty cache frequency
-            self.empty_cuda_cache_freq = self.config.get("extras", {}).get("empty_cuda_cache_freq", 10)
-
-            # Optional test: encode/decode a sentence
-            test_sentence = "Hello, how are you?"
-            encoded_ids = self.tokenizer.encode(test_sentence)
-            decoded_sentence = self.tokenizer.decode(encoded_ids)
-            self.logger.info(f"Test sentence: {test_sentence}")
-            self.logger.info(f"Encoded IDs: {encoded_ids}")
-            self.logger.info(f"Decoded sentence: {decoded_sentence}")
-
-        except Exception as e:
-            raise RuntimeError(f"LuminaLM Initialization failed: {e}")
-
-    def _setup_distributed_training(self):
-        """Enable DataParallel if multiple GPUs are available."""
-        if torch.cuda.device_count() > 1:
-            self.model = torch.nn.DataParallel(self.model)
-            self.logger.info(f"Using {torch.cuda.device_count()} GPUs for LuminaLM")
-
-    def _configure_scheduler(self, optimizer, config, num_training_steps):
-        """
-        Set up learning rate scheduler.
-        """
-        num_warmup_steps = int(num_training_steps * config.get('warmup_ratio', 0.1))
-        scheduler_type = config.get("scheduler_type", "linear")
-        lr_scheduler_kwargs = config.get("lr_scheduler_kwargs", {})
-
-        if scheduler_type in ["cosine_warmup", "cosine_with_min_lr"]:
-            default_min_lr = 0.0 if scheduler_type == "cosine_warmup" else 1e-6
-            min_lr = float(lr_scheduler_kwargs.get("min_lr", default_min_lr))
-
-            def lr_lambda(step):
-                if step < num_warmup_steps:
-                    return float(step) / float(max(1, num_warmup_steps))
-                else:
-                    progress = float(step - num_warmup_steps) / float(
-                        max(1, num_training_steps - num_warmup_steps)
-                    )
-                    return min_lr + (
-                        (self.config['training']['learning_rate'] - min_lr)
-                        * 0.5
-                        * (1.0 + np.cos(np.pi * progress))
-                    )
-
-            return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-        elif scheduler_type == "linear_warmup":
-            return transformers.get_linear_schedule_with_warmup(
-                optimizer,
-                num_warmup_steps=num_warmup_steps,
-                num_training_steps=num_training_steps
-            )
-        else:
-            raise ValueError(f"Unknown scheduler type: {scheduler_type}")
-
-    def _configure_optimizer(self):
-        """
-        Set up AdamW optimizer with weight decay for most params, no-decay for e.g. LayerNorm/bias.
-        """
-        decay_params = []
-        no_decay_params = []
-
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
-            # Prevent extremely large param values
-            if param.abs().max() > 1.0:
-                with torch.no_grad():
-                    param.data.div_(param.abs().max())
-
-            if any(nd in name for nd in ["bias", "LayerNorm.weight"]):
-                no_decay_params.append(param)
-            else:
-                decay_params.append(param)
-
-        optimizer_grouped_parameters = [
-            {'params': decay_params, 'weight_decay': self.config['training']['weight_decay']},
-            {'params': no_decay_params, 'weight_decay': 0.0}
-        ]
-
-        optimizer_params = self.config.get("optimizer", {})
-        eps = float(optimizer_params.get("eps", 1e-8))
-        betas = tuple(optimizer_params.get("betas", [0.9, 0.999]))
-
-        # AdamW
-        optimizer = torch.optim.AdamW(
-            optimizer_grouped_parameters,
-            lr=self.config['training']['learning_rate'],
-            betas=betas,
-            eps=eps,
-            weight_decay=self.config['training']['weight_decay'],
-            amsgrad=True
+        # Setup logging
+        self.logger = setup_logging(
+            os.path.join(config.checkpoint_dir, "logs"),
+            rank=self.local_rank,
         )
-        return optimizer
 
-    def _validate_config(self, config: Dict):
-        """
-        Checks for necessary sections/keys in the config and ensures values are usable.
-        """
-        try:
-            required_nested_keys = {
-                'training': ['device', 'epochs', 'batch_size', 'learning_rate'],
-                'model': ['num_layers', 'num_heads', 'hidden_dim'],
-                'logging': ['log_dir']
-            }
-            for section, keys in required_nested_keys.items():
-                if section not in config:
-                    raise ConfigurationError(f"Missing required section: {section}")
-                for key in keys:
-                    if key not in config[section]:
-                        raise ConfigurationError(f"Missing required key '{key}' in {section} section")
+        # Set seed
+        set_seed(config.seed + self.local_rank)
 
-            # Make sure we can interpret the learning rate as a float
-            try:
-                config['training']['learning_rate'] = float(config['training']['learning_rate'])
-            except (ValueError, TypeError):
-                raise ConfigurationError("Invalid learning rate value")
+        # Initialize tokenizer
+        self.tokenizer = self._setup_tokenizer()
 
-            # If config demands CUDA but it's not available, error out
-            if 'cuda' in str(config['training']['device']) and not torch.cuda.is_available():
-                raise ConfigurationError("CUDA device specified but not available")
+        # Initialize model
+        self.model = self._setup_model()
 
-        except Exception as e:
-            raise ConfigurationError(f"Configuration validation failed: {str(e)}")
+        # Initialize datasets
+        self.train_dataset, self.val_dataset = self._setup_datasets()
 
-    def _calculate_perplexity(self, loss: float) -> float:
-        """
-        Calculates perplexity from loss. (ppl = exp(loss))
-        """
-        return float(torch.exp(torch.tensor(loss)))
+        # Initialize DeepSpeed engine
+        self.model_engine, self.optimizer, self.train_loader, self.scheduler = self._setup_deepspeed()
 
-    def _early_stopping(self, val_metric: float) -> bool:
-        """
-        Tracks whether validation metric improved; triggers early stopping if not.
-        """
-        improved = val_metric < self.best_metric
-        if improved:
-            self.best_metric = val_metric
-            self.stopping_counter = 0
-            self._save_best_model()
-            return False
+        # Training state
+        self.global_step = 0
+        self.best_val_loss = float('inf')
+        self.patience_counter = 0
+
+        # WandB
+        if config.use_wandb and WANDB_AVAILABLE and self.local_rank == 0:
+            wandb.init(
+                project=config.wandb_project,
+                config={**vars(config), **model_config},
+            )
+            self.use_wandb = True
         else:
-            self.stopping_counter += 1
+            self.use_wandb = False
 
-        if self.stopping_counter >= self.early_stopping_patience:
-            self.logger.info(f"Early stopping triggered after {self.stopping_counter} epochs without improvement")
-            self._restore_best_model()
-            return True
-        return False
-
-    def _save_best_model(self):
-        """
-        Saves a "best model" checkpoint (when validation improves).
-        """
-        best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_LuminaLM_model.pt')
-        torch.save({
-            'epoch': self.start_epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'best_metric': self.best_metric,
-            'config': self.config
-        }, best_model_path)
-        self.logger.info(f"Saved best model to {best_model_path}")
-
-    def _restore_best_model(self):
-        """
-        Restores model/optimizer/scheduler states from the "best model" checkpoint.
-        """
-        best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_LuminaLM_model.pt')
-        if os.path.exists(best_model_path):
-            checkpoint = torch.load(best_model_path, map_location=str(self.device), weights_only=True)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            self.logger.info("Restored best model state")
+    def _setup_distributed(self):
+        """Setup distributed training environment."""
+        if self.config.use_deepspeed and DEEPSPEED_AVAILABLE:
+            deepspeed.init_distributed()
+            self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            self.world_size = int(os.environ.get("WORLD_SIZE", 1))
         else:
-            self.logger.warning("No best model checkpoint found to restore")
+            self.local_rank = 0
+            self.world_size = 1
 
-    def _log_training_metrics(self, loss: float, step: int, epoch: int):
-        """Log training metrics to W&B if enabled."""
-        if not self.use_wandb:
-            return
-        metrics = {
-            "train/loss": loss,
-            "train/learning_rate": self.scheduler.get_last_lr()[0],
-            "train/epoch": epoch,
-            "train/step": step,
-        }
         if torch.cuda.is_available():
-            metrics.update({
-                "system/gpu_memory_allocated": torch.cuda.memory_allocated(),
-                "system/gpu_memory_reserved": torch.cuda.memory_reserved()
-            })
-        wandb.log(metrics)
+            torch.cuda.set_device(self.local_rank)
+            self.device = torch.device("cuda", self.local_rank)
+        else:
+            self.device = torch.device("cpu")
 
-    def _compute_gradient_norm(self) -> float:
-        """
-        Returns L2 norm of gradients.
-        """
-        total_norm = 0.0
-        for p in self.model.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.data.norm(2).item()
-                total_norm += param_norm ** 2
-        return total_norm ** 0.5
+        if self.local_rank == 0:
+            print(f"Distributed training: world_size={self.world_size}, local_rank={self.local_rank}")
 
-    def _handle_oom_error(self):
-        """
-        Attempt to handle an out-of-memory error by reducing batch size.
-        """
-        if hasattr(torch.cuda, 'empty_cache'):
-            torch.cuda.empty_cache()
-        self.logger.warning("OOM detected. Attempting to recover...")
+    def _setup_tokenizer(self):
+        """Initialize tokenizer."""
+        tokenizer = get_tokenizer(
+            self.config.tokenizer_path,
+            vocab_size=self.model_config.get("vocab_size", 32000),
+        )
 
-        if self.config['training']['batch_size'] > 1:
-            self.config['training']['batch_size'] //= 2
-            self.logger.warning(f"Reduced batch size to {self.config['training']['batch_size']}")
-            self._setup_dataloaders()
+        # Resize model vocab if needed
+        self.model_config["vocab_size"] = len(tokenizer)
 
-    def _setup_dataloaders(self):
-        """
-        Re-create DataLoaders if we adjust the batch size at runtime (e.g., after OOM).
-        """
-        self.train_loader = DataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config['training']['batch_size'],
+        return tokenizer
+
+    def _setup_model(self) -> SPARSALM:
+        """Initialize or load model."""
+        if self.config.model_path and os.path.exists(self.config.model_path):
+            self.logger.info(f"Loading model from {self.config.model_path}")
+            model = SPARSALM.from_pretrained(self.config.model_path)
+        else:
+            self.logger.info("Creating new model")
+            model = create_model(self.model_config)
+
+        # Log model size
+        num_params = model.num_parameters()
+        self.logger.info(f"Model parameters: {num_params:,} ({num_params/1e6:.1f}M)")
+
+        return model
+
+    def _setup_datasets(self):
+        """Initialize datasets."""
+        self.logger.info("Setting up datasets...")
+
+        train_dataset = StreamingPretrainDataset(
+            config=self.data_config,
+            tokenizer=self.tokenizer,
+            split="train",
+        )
+
+        val_dataset = StreamingPretrainDataset(
+            config=self.data_config,
+            tokenizer=self.tokenizer,
+            split="validation",
+        )
+
+        return train_dataset, val_dataset
+
+    def _setup_deepspeed(self):
+        """Initialize DeepSpeed engine."""
+        # Load DeepSpeed config
+        if os.path.exists(self.config.deepspeed_config):
+            with open(self.config.deepspeed_config) as f:
+                ds_config = json.load(f)
+        else:
+            # Default config
+            ds_config = self._get_default_deepspeed_config()
+
+        # Update config with training params
+        ds_config["train_micro_batch_size_per_gpu"] = self.config.batch_size
+        ds_config["gradient_accumulation_steps"] = self.config.gradient_accumulation_steps
+
+        # Setup optimizer params
+        optimizer_params = get_optimizer_grouped_params(
+            self.model,
+            self.config.weight_decay,
+            self.config.learning_rate,
+        )
+
+        # Create data loader
+        train_loader = create_dataloader(
+            self.train_dataset,
+            batch_size=self.config.batch_size,
             shuffle=True,
-            num_workers=self.config['training'].get('num_workers', 1),
-            pin_memory=self.config['training'].get('pin_memory', True),
-            collate_fn=TextDataset.collate_fn,
-            drop_last=self.config['training'].get('drop_last', False)
-        )
-        self.val_loader = DataLoader(
-            dataset=self.val_dataset,
-            batch_size=self.config['training']['batch_size'],
-            shuffle=False,
-            num_workers=self.config['training'].get('num_workers', 1),
-            pin_memory=self.config['training'].get('pin_memory', True),
-            collate_fn=TextDataset.collate_fn,
-            drop_last=self.config['training'].get('drop_last', False)
+            num_workers=4,
         )
 
-    def train_one_epoch(self, epoch: int) -> Tuple[float, float]:
-        """
-        Executes a single training epoch, including gradient accumulation,
-        gradient clipping, and returning average loss & perplexity.
-        """
-        self.model.train()
-        total_loss = 0.0
-        step_in_epoch = 0
-        accumulation_counter = 0
-        accum_loss = 0.0
-        raw_loss_accum = 0.0  # For unscaled loss accumulation
+        # Calculate training steps
+        num_training_steps = len(train_loader) * self.config.epochs
+        num_warmup_steps = int(num_training_steps * self.config.warmup_ratio)
 
-        if not hasattr(self, 'scaler') or self.scaler is None:
-            self.scaler = GradScaler(
-                enabled=self.config['training'].get('use_mixed_precision', True),
-                init_scale=2**10,
-                growth_factor=1.5,
-                backoff_factor=0.5,
-                growth_interval=100
+        if self.config.use_deepspeed and DEEPSPEED_AVAILABLE:
+            # Initialize DeepSpeed
+            model_engine, optimizer, _, scheduler = deepspeed.initialize(
+                model=self.model,
+                model_parameters=optimizer_params,
+                config=ds_config,
             )
 
-        progress_bar = tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}")
-        self.optimizer.zero_grad(set_to_none=True)
+            self.logger.info(f"DeepSpeed initialized with ZeRO stage {ds_config.get('zero_optimization', {}).get('stage', 0)}")
+        else:
+            # Fallback to standard PyTorch
+            model_engine = self.model.to(self.device)
 
-        for step, batch in enumerate(progress_bar):
-            try:
-                encoder_input_ids = batch["encoder_input_ids"].to(self.device).long()
-                encoder_attention_mask = batch["encoder_attention_mask"].to(self.device)
-                decoder_input_ids = batch["decoder_input_ids"].to(self.device).long()
-                decoder_attention_mask = batch["decoder_attention_mask"].to(self.device)
-                labels = batch["labels"].to(self.device).long()
+            optimizer = torch.optim.AdamW(
+                optimizer_params,
+                lr=self.config.learning_rate,
+                betas=(0.9, 0.95),
+                eps=1e-8,
+            )
 
-                # Mixed-precision autocast
-                with torch.amp.autocast(
-                    device_type="cuda" if torch.cuda.is_available() else "cpu",
-                    enabled=self.config['training'].get('use_mixed_precision', True)
-                ):
-                    outputs = self.model(
-                        src=encoder_input_ids,
-                        tgt=decoder_input_ids,
-                        attention_mask=encoder_attention_mask,
-                        tgt_mask=decoder_attention_mask
-                    )
+            scheduler = get_scheduler(
+                "cosine",
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
 
-                    if not torch.isfinite(outputs).all():
-                        self.logger.warning(f"Step {step} - Non-finite values in model output, skipping batch")
-                        continue
+        return model_engine, optimizer, train_loader, scheduler
 
-                    flat_outputs = outputs.view(-1, outputs.size(-1))
-                    flat_labels = labels.view(-1)
-                    eps = 1e-8
-                    flat_outputs = flat_outputs + eps
+    def _get_default_deepspeed_config(self) -> Dict:
+        """Get default DeepSpeed configuration."""
+        return {
+            "train_batch_size": "auto",
+            "train_micro_batch_size_per_gpu": self.config.batch_size,
+            "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
+            "gradient_clipping": self.config.max_grad_norm,
 
-                    # Compute raw loss
-                    raw_loss = self.criterion(flat_outputs, flat_labels)
-                    if not torch.isfinite(raw_loss):
-                        self.logger.warning(f"Step {step} - Non-finite loss detected, skipping batch")
-                        continue
+            "zero_optimization": {
+                "stage": self.config.zero_stage,
+                "overlap_comm": True,
+                "contiguous_gradients": True,
+                "reduce_bucket_size": 5e8,
+                "stage3_prefetch_bucket_size": 5e8,
+                "stage3_param_persistence_threshold": 1e6,
+            },
 
-                    # Scale loss for gradient accumulation
-                    loss = raw_loss / self.gradient_accumulation_steps
+            "bf16": {
+                "enabled": self.config.bf16,
+            },
 
-                self.scaler.scale(loss).backward()
-                accumulation_counter += 1
-                accum_loss += loss.item()
-                raw_loss_accum += raw_loss.item()
+            "fp16": {
+                "enabled": self.config.fp16,
+                "loss_scale": 0,
+                "initial_scale_power": 16,
+            },
 
-                # If we've reached accumulation steps, update weights
-                if accumulation_counter == self.gradient_accumulation_steps:
-                    # Unscale the gradients for mixed precision
-                    self.scaler.unscale_(self.optimizer)
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": self.config.learning_rate,
+                    "betas": [0.9, 0.95],
+                    "eps": 1e-8,
+                    "weight_decay": self.config.weight_decay,
+                }
+            },
 
-                    # ---- Gradient Clipping Here ----
-                    max_grad_norm = self.config['training'].get('max_grad_norm', 1.0)
-                    clip_grad_norm_(self.model.parameters(), max_grad_norm)
+            "scheduler": {
+                "type": "WarmupDecayLR",
+                "params": {
+                    "warmup_min_lr": 0,
+                    "warmup_max_lr": self.config.learning_rate,
+                    "warmup_num_steps": "auto",
+                    "total_num_steps": "auto",
+                }
+            },
 
-                    # Check for any invalid gradients
-                    valid_gradients = True
-                    grad_norm = 0.0
-                    max_grad_value = 0.0
-                    for name, param in self.model.named_parameters():
-                        if param.grad is not None:
-                            grad_value = param.grad.abs().max().item()
-                            max_grad_value = max(max_grad_value, grad_value)
-                            if not torch.isfinite(param.grad).all():
-                                self.logger.warning(f"NaN/Inf in gradients of {name}")
-                                valid_gradients = False
-                                break
-                            grad_norm += param.grad.norm().item() ** 2
-                    grad_norm = grad_norm ** 0.5
+            "activation_checkpointing": {
+                "partition_activations": True,
+                "contiguous_memory_optimization": True,
+            },
 
-                    # Check max_grad_value if you want to skip steps with extreme gradients
-                    if max_grad_value > self.config['training'].get('max_grad_value', 100.0):
-                        self.logger.warning(f"Step {step} - Gradient value too large: {max_grad_value}")
-                        valid_gradients = False
+            "wall_clock_breakdown": False,
+        }
 
-                    if valid_gradients:
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        if self.scheduler is not None:
-                            self.scheduler.step()
-                        total_loss += raw_loss_accum
-                        step_in_epoch += 1
-                    else:
-                        self.logger.warning(f"Step {step} - Invalid gradients; skipping optimizer step.")
-                        self.scaler.update()
+    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        """Execute single training step."""
+        self.model_engine.train()
 
-                    # Reset for next accumulation
-                    self.optimizer.zero_grad(set_to_none=True)
-                    accumulation_counter = 0
-                    accum_loss = 0.0
-                    raw_loss_accum = 0.0
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["labels"].to(self.device)
 
-                # Log info in progress bar
-                current_lr = (
-                    self.scheduler.get_last_lr()[0] if self.scheduler else self.config['training']['learning_rate']
-                )
-                adjusted_loss = loss.item() * self.gradient_accumulation_steps
-                progress_bar.set_postfix({
-                    'loss': f'{adjusted_loss:.4f}',
-                    'lr': f'{current_lr:.2e}',
-                    'grad_norm': f'{grad_norm:.2e}' if 'grad_norm' in locals() else 'N/A'
-                })
+        # Forward pass
+        outputs = self.model_engine(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+        )
 
-                # Periodically empty CUDA cache if specified
-                if step % self.config.get("extras", {}).get("empty_cuda_cache_freq", 10) == 0:
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+        # Compute loss
+        logits = outputs["logits"]
+        loss = self.model_engine.module.compute_loss(logits, labels) if hasattr(self.model_engine, 'module') else self.model.compute_loss(logits, labels)
 
-            except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    self._handle_oom_error()
-                    continue
-                raise e
+        # Backward pass
+        if self.config.use_deepspeed and DEEPSPEED_AVAILABLE:
+            self.model_engine.backward(loss)
+            self.model_engine.step()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+            self.optimizer.step()
+            self.scheduler.step()
+            self.optimizer.zero_grad()
 
-            # Optionally log to W&B
-            if self.use_wandb:
-                wandb.log({"train/loss": adjusted_loss, "train/learning_rate": current_lr})
+        # Compute metrics
+        with torch.no_grad():
+            perplexity = torch.exp(loss).item()
 
-        avg_loss = total_loss / step_in_epoch if step_in_epoch > 0 else float('inf')
-        return avg_loss, self._calculate_perplexity(avg_loss)
+        return {
+            "loss": loss.item(),
+            "perplexity": perplexity,
+        }
 
     @torch.no_grad()
-    def validate(self, epoch: int) -> Tuple[float, float]:
-        """
-        Runs one pass of validation on self.val_loader, returns average loss + perplexity.
-        """
-        self.model.eval()
+    def validate(self) -> Dict[str, float]:
+        """Run validation."""
+        self.model_engine.eval()
+
+        val_loader = create_dataloader(
+            self.val_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            num_workers=2,
+        )
+
         total_loss = 0.0
-        valid_steps = 0
-        progress_bar = tqdm(self.val_loader, desc=f"LuminaLM Validating Epoch {epoch + 1}")
+        total_steps = 0
 
-        for step, batch in enumerate(progress_bar):
-            try:
-                encoder_input_ids = batch.get("encoder_input_ids", None)
-                encoder_attention_mask = batch.get("encoder_attention_mask", None)
-                decoder_input_ids = batch.get("decoder_input_ids", None)
-                decoder_attention_mask = batch.get("decoder_attention_mask", None)
-                labels = batch.get("labels", None)
+        for batch in tqdm(val_loader, desc="Validating", disable=self.local_rank != 0):
+            input_ids = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+            labels = batch["labels"].to(self.device)
 
-                if not all(t is not None for t in [encoder_input_ids, encoder_attention_mask, decoder_input_ids, decoder_attention_mask, labels]):
-                    self.logger.error(f"Step {step} - Missing keys in batch. Skipping...")
-                    continue
+            outputs = self.model_engine(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
 
-                encoder_input_ids = encoder_input_ids.to(self.device).long()
-                encoder_attention_mask = encoder_attention_mask.to(self.device)
-                decoder_input_ids = decoder_input_ids.to(self.device).long()
-                decoder_attention_mask = decoder_attention_mask.to(self.device)
-                labels = labels.to(self.device).long()
+            logits = outputs["logits"]
+            loss = self.model_engine.module.compute_loss(logits, labels) if hasattr(self.model_engine, 'module') else self.model.compute_loss(logits, labels)
 
-                # Evaluate under autocast
-                with torch.amp.autocast(
-                    device_type="cuda" if torch.cuda.is_available() else "cpu",
-                    enabled=self.config['training'].get('use_mixed_precision', True)
-                ):
-                    outputs = self.model(
-                        src=encoder_input_ids,
-                        tgt=decoder_input_ids,
-                        attention_mask=encoder_attention_mask,
-                        tgt_mask=decoder_attention_mask
-                    )
+            total_loss += loss.item()
+            total_steps += 1
 
-                if torch.isnan(outputs).any() or torch.isinf(outputs).any():
-                    self.logger.error(f"Step {step} - Model output has NaN/Inf; skipping batch.")
-                    continue
+            if total_steps >= 100:  # Limit validation steps
+                break
 
-                flat_outputs = outputs.view(-1, outputs.size(-1))
-                flat_labels = labels.view(-1)
-                loss = self.criterion(flat_outputs, flat_labels)
+        avg_loss = total_loss / max(total_steps, 1)
+        perplexity = math.exp(avg_loss)
 
-                if torch.isnan(loss) or torch.isinf(loss):
-                    self.logger.error(f"Step {step} - NaN/Inf in validation loss; skipping batch.")
-                    continue
+        return {
+            "val_loss": avg_loss,
+            "val_perplexity": perplexity,
+        }
 
-                total_loss += loss.item()
-                valid_steps += 1
-                self.logger.info(f"Step {step} - Validation Loss: {loss.item():.4f}")
+    def save_checkpoint(self, tag: str = "latest"):
+        """Save model checkpoint."""
+        if self.local_rank != 0:
+            return
 
-                # Optionally log memory usage
-                if step % self.config['memory_monitor'].get('log_frequency', 100) == 0:
-                    if self.memory_monitor:
-                        self.memory_monitor.log_memory()
+        checkpoint_path = os.path.join(self.config.checkpoint_dir, tag)
+        os.makedirs(checkpoint_path, exist_ok=True)
 
-            except Exception as e:
-                self.logger.error(f"Validation Error at Step {step}: {e}")
+        if self.config.use_deepspeed and DEEPSPEED_AVAILABLE:
+            self.model_engine.save_checkpoint(checkpoint_path)
+        else:
+            # Save model
+            model_to_save = self.model_engine.module if hasattr(self.model_engine, 'module') else self.model_engine
+            model_to_save.save_pretrained(checkpoint_path)
 
-        avg_loss = total_loss / valid_steps if valid_steps > 0 else float('inf')
-        val_perplexity = self._calculate_perplexity(avg_loss)
-        self.logger.info(f"LuminaLM Epoch {epoch + 1} Validation Loss: {avg_loss:.4f}, Perplexity: {val_perplexity:.2f}")
+            # Save optimizer and scheduler
+            torch.save({
+                "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.scheduler.state_dict(),
+                "global_step": self.global_step,
+                "best_val_loss": self.best_val_loss,
+            }, os.path.join(checkpoint_path, "training_state.pt"))
 
-        # Optionally log to W&B
+        # Save tokenizer
+        self.tokenizer.save_pretrained(checkpoint_path)
+
+        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
+
+    def train(self):
+        """Main training loop."""
+        self.logger.info("Starting training...")
+        self.logger.info(f"Epochs: {self.config.epochs}")
+        self.logger.info(f"Batch size: {self.config.batch_size}")
+        self.logger.info(f"Gradient accumulation: {self.config.gradient_accumulation_steps}")
+        self.logger.info(f"Effective batch size: {self.config.batch_size * self.config.gradient_accumulation_steps * self.world_size}")
+
+        for epoch in range(self.config.epochs):
+            self.logger.info(f"\n{'='*50}")
+            self.logger.info(f"Epoch {epoch + 1}/{self.config.epochs}")
+
+            epoch_loss = 0.0
+            epoch_steps = 0
+
+            progress_bar = tqdm(
+                self.train_loader,
+                desc=f"Epoch {epoch + 1}",
+                disable=self.local_rank != 0,
+            )
+
+            for step, batch in enumerate(progress_bar):
+                metrics = self.train_step(batch)
+
+                epoch_loss += metrics["loss"]
+                epoch_steps += 1
+                self.global_step += 1
+
+                # Update progress bar
+                progress_bar.set_postfix({
+                    "loss": f"{metrics['loss']:.4f}",
+                    "ppl": f"{metrics['perplexity']:.2f}",
+                })
+
+                # Logging
+                if self.global_step % self.config.logging_steps == 0:
+                    if self.use_wandb:
+                        wandb.log({
+                            "train/loss": metrics["loss"],
+                            "train/perplexity": metrics["perplexity"],
+                            "train/learning_rate": self.scheduler.get_last_lr()[0] if hasattr(self.scheduler, 'get_last_lr') else self.config.learning_rate,
+                            "train/global_step": self.global_step,
+                        })
+
+                # Evaluation
+                if self.global_step % self.config.eval_steps == 0:
+                    val_metrics = self.validate()
+                    self.logger.info(f"Step {self.global_step} - Val Loss: {val_metrics['val_loss']:.4f}, Val PPL: {val_metrics['val_perplexity']:.2f}")
+
+                    if self.use_wandb:
+                        wandb.log({
+                            "val/loss": val_metrics["val_loss"],
+                            "val/perplexity": val_metrics["val_perplexity"],
+                        })
+
+                    # Early stopping check
+                    if val_metrics["val_loss"] < self.best_val_loss:
+                        self.best_val_loss = val_metrics["val_loss"]
+                        self.patience_counter = 0
+                        self.save_checkpoint("best")
+                    else:
+                        self.patience_counter += 1
+
+                    if self.patience_counter >= self.config.early_stopping_patience:
+                        self.logger.info("Early stopping triggered")
+                        break
+
+                # Save checkpoint
+                if self.global_step % self.config.save_steps == 0:
+                    self.save_checkpoint(f"step_{self.global_step}")
+
+            # Epoch summary
+            avg_epoch_loss = epoch_loss / max(epoch_steps, 1)
+            self.logger.info(f"Epoch {epoch + 1} - Avg Loss: {avg_epoch_loss:.4f}")
+
+            # Save epoch checkpoint
+            self.save_checkpoint(f"epoch_{epoch + 1}")
+
+            if self.patience_counter >= self.config.early_stopping_patience:
+                break
+
+        # Final save
+        self.save_checkpoint("final")
+        self.logger.info("Training completed!")
+
         if self.use_wandb:
-            wandb.log({"model": "LuminaLM", "val_loss": avg_loss, "val_perplexity": val_perplexity})
-
-        return avg_loss, val_perplexity
-
-    def train(self) -> str:
-        """
-        Main training loop: iterates over epochs, performs train/val, checkpointing, early stopping.
-        Returns path to best model checkpoint.
-        """
-        try:
-            best_val_loss = float('inf')
-            best_model_path = os.path.join(self.config['training']['checkpoint_dir'], 'best_LuminaLM_model.pt')
-
-            for epoch in range(self.start_epoch, self.config['training']['epochs']):
-                self.logger.info(f"\n{'='*50}")
-                self.logger.info(f"Starting LuminaLM Epoch {epoch + 1}/{self.config['training']['epochs']}")
-                if torch.cuda.is_available():
-                    self.logger.info(f"GPU Memory before epoch: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
-
-                # -------------------- One Training Epoch ---------------------
-                train_loss, train_ppl = self.train_one_epoch(epoch)
-                self.logger.info(f"Epoch {epoch + 1} Training - Loss: {train_loss:.4f}, Perplexity: {train_ppl:.2f}")
-
-                # ------------------------ Validation --------------------------
-                val_loss, val_ppl = self.validate(epoch)
-                self.logger.info(f"Epoch {epoch + 1} Validation - Loss: {val_loss:.4f}, Perplexity: {val_ppl:.2f}")
-                self.logger.info(f"Current val_loss: {val_loss:.4f}, Best val_loss: {best_val_loss:.4f}")
-                self.logger.info(f"Early stopping counter: {self.stopping_counter}/{self.early_stopping_patience}")
-
-                # Check early stopping
-                if self._early_stopping(val_loss):
-                    self.logger.warning(f"Early stopping triggered at epoch {epoch + 1}")
-                    self.logger.warning(f"Final early stopping counter: {self.stopping_counter}")
-                    self.logger.warning(f"Best validation loss achieved: {self.best_metric:.4f}")
-                    break
-
-                # Check if new best
-                if val_loss < best_val_loss:
-                    self.logger.info(f"Validation loss improved from {best_val_loss:.4f} to {val_loss:.4f}")
-                    best_val_loss = val_loss
-                    torch.save({
-                        'model_name': 'LuminaLM',
-                        'epoch': epoch,
-                        'model_state_dict': self.model.state_dict(),
-                        'optimizer_state_dict': self.optimizer.state_dict(),
-                        'scheduler_state_dict': self.scheduler.state_dict(),
-                        'loss': best_val_loss,
-                        'stopping_counter': self.stopping_counter,
-                        'best_metric': self.best_metric
-                    }, best_model_path)
-                    self.logger.info(f"Saved best model checkpoint at epoch {epoch + 1}")
-                else:
-                    self.logger.info(f"Validation loss did not improve from {best_val_loss:.4f}")
-
-                # Always save a "latest" checkpoint
-                latest_checkpoint_path = os.path.join(
-                    self.config['training']['checkpoint_dir'],
-                    'latest_LuminaLM_model_checkpoint.pt'
-                )
-                torch.save({
-                    'model_name': 'LuminaLM',
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
-                    'loss': val_loss,
-                    'stopping_counter': self.stopping_counter,
-                    'best_metric': self.best_metric
-                }, latest_checkpoint_path)
-                self.logger.info(f"Saved latest model checkpoint after epoch {epoch + 1}")
-
-                current_lr = self.scheduler.get_last_lr()[0]
-                self.logger.info(f"Current learning rate: {current_lr:.2e}")
-                self.logger.info(f"{'='*50}\n")
-
-            self.logger.info("LuminaLM training completed.")
-            return best_model_path
-
-        except Exception as e:
-            self.logger.error(f"Training failed with error: {str(e)}")
-            self.logger.error(f"Error traceback: {traceback.format_exc()}")
-            raise
+            wandb.finish()
 
 
-# ----------------------------------------------------------------------
-# Main function
-# ----------------------------------------------------------------------
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load configuration from YAML file."""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
 def main():
-    """
-    Main entry point for running training. Loads config files, prepares trainer, and launches training.
-    """
-    training_config_path = 'config/training_config.yaml'
-    data_config_path = 'config/training_data_config.yaml'
-    try:
-        with open(training_config_path, 'r') as f:
-            training_config = yaml.safe_load(f)
-        with open(data_config_path, 'r') as f:
-            data_config = yaml.safe_load(f)
+    """Main entry point for training."""
+    import argparse
 
-        # Create or ensure the model directory exists
-        model_dir = 'model'
-        os.makedirs(model_dir, exist_ok=True)
-        training_config['training']['checkpoint_dir'] = model_dir
+    parser = argparse.ArgumentParser(description="SPARSA-LM Training")
+    parser.add_argument("--config", type=str, default="config/training_config.yaml")
+    parser.add_argument("--deepspeed_config", type=str, default="config/deepspeed_config.json")
+    parser.add_argument("--local_rank", type=int, default=-1)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--learning_rate", type=float, default=None)
+    args = parser.parse_args()
 
-        # Instantiate and run training
-        trainer = Trainer(training_config=training_config, data_config=data_config)
-        best_model_path = trainer.train()
+    # Load config
+    config_dict = load_config(args.config)
 
-        print(f"Training completed. Best model saved at: {best_model_path}")
+    # Create training config
+    training_config = TrainingConfig(
+        epochs=args.epochs or config_dict["training"].get("epochs", 100),
+        batch_size=args.batch_size or config_dict["training"].get("batch_size", 4),
+        gradient_accumulation_steps=config_dict["training"].get("gradient_accumulation_steps", 8),
+        learning_rate=args.learning_rate or config_dict["training"].get("learning_rate", 3e-4),
+        weight_decay=config_dict["training"].get("weight_decay", 0.1),
+        max_grad_norm=config_dict["training"].get("max_grad_norm", 1.0),
+        warmup_ratio=config_dict["training"].get("warmup_ratio", 0.03),
+        tokenizer_path=config_dict["tokenizer"].get("path", "tokenizer"),
+        max_seq_len=config_dict["model"].get("max_seq_len", 2048),
+        use_deepspeed=config_dict["training"].get("use_deepspeed", True),
+        deepspeed_config=args.deepspeed_config,
+        zero_stage=2,
+        bf16=config_dict["training"].get("bf16", True),
+        checkpoint_dir=config_dict["training"].get("checkpoint_dir", "checkpoints/sparsa-360m"),
+        save_steps=config_dict["training"].get("checkpoint_save_frequency", 1000),
+        eval_steps=500,
+        logging_steps=config_dict["training"].get("log_every_n_steps", 10),
+        use_wandb=config_dict["logging"].get("use_wandb", True),
+        wandb_project=config_dict["logging"].get("wandb_project", "SPARSA-LM-360M"),
+        early_stopping_patience=config_dict["training"].get("early_stopping_patience", 5),
+        seed=config_dict["training"].get("seed", 42),
+        local_rank=args.local_rank,
+    )
 
-    except Exception as e:
-        logging.error(f"Training failed: {e}")
-        raise
+    # Model config
+    model_config = config_dict["model"]
+
+    # Initialize trainer
+    trainer = DeepSpeedTrainer(
+        config=training_config,
+        model_config=model_config,
+    )
+
+    # Start training
+    trainer.train()
 
 
 if __name__ == "__main__":

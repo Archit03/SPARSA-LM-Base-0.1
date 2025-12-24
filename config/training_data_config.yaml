@@ -1,9 +1,143 @@
-datasets:
-  - name: local_data
-    type: local
-    config:
-      source_dir: "C:/Users/ASUS/Desktop/PreProcessed/processed/cleaned/test"  # Ensure this directory exists
-      patterns:
-        - "*.txt"
-        - "*.csv"
-      csv_text_column: "text"  # Column name for CSV files
+# config/training_data_config.yaml
+# SPARSA-LM Dataset Configuration - HuggingFace Streaming
+
+# Pre-training dataset mixture
+pretrain:
+  streaming: true
+  buffer_size: 10000
+  shuffle_buffer: 10000
+  use_packing: true
+
+  # Domain weights for pre-training mixture
+  domain_weights:
+    language: 0.35
+    code: 0.25
+    math: 0.15
+    reasoning: 0.15
+    medical: 0.10
+
+  # Datasets by domain
+  domains:
+    language:
+      - name: "allenai/c4"
+        subset: "en"
+        weight: 0.4
+      - name: "wikipedia"
+        subset: "20220301.en"
+        weight: 0.3
+      - name: "HuggingFaceFW/fineweb"
+        weight: 0.3
+
+    code:
+      - name: "bigcode/starcoderdata"
+        weight: 0.5
+      - name: "codeparrot/github-code"
+        subset: "Python"
+        weight: 0.3
+      - name: "bigcode/the-stack-dedup"
+        weight: 0.2
+
+    math:
+      - name: "open-web-math/open-web-math"
+        weight: 0.4
+      - name: "camel-ai/math"
+        weight: 0.3
+      - name: "EleutherAI/proof-pile-2"
+        weight: 0.3
+
+    reasoning:
+      - name: "allenai/ai2_arc"
+        subset: "ARC-Challenge"
+        weight: 0.3
+      - name: "openai/gsm8k"
+        subset: "main"
+        weight: 0.4
+      - name: "TIGER-Lab/MATH"
+        weight: 0.3
+
+    medical:
+      - name: "medmcqa"
+        weight: 0.4
+      - name: "pubmed_qa"
+        subset: "pqa_labeled"
+        weight: 0.3
+      - name: "bigbio/pubmed"
+        weight: 0.3
+
+# Instruction tuning datasets
+instruction:
+  datasets:
+    - name: "cais/mmlu"
+      subset: "all"
+      format: "mcqa"
+      weight: 0.2
+
+    - name: "hendrycks/competition_math"
+      format: "math"
+      weight: 0.15
+
+    - name: "bigcode/the-stack-smol"
+      subset: "data/python"
+      format: "code"
+      weight: 0.15
+      max_samples: 50000
+
+    - name: "openai/gsm8k"
+      subset: "main"
+      format: "math_word"
+      weight: 0.15
+
+    - name: "allenai/ai2_arc"
+      subset: "ARC-Challenge"
+      format: "mcqa"
+      weight: 0.1
+
+    - name: "tatsu-lab/alpaca"
+      format: "instruction"
+      weight: 0.15
+
+    - name: "Open-Orca/OpenOrca"
+      format: "instruction"
+      weight: 0.1
+      max_samples: 100000
+
+# Preference/RLHF datasets
+preference:
+  datasets:
+    - name: "Anthropic/hh-rlhf"
+      split: "train"
+      weight: 0.5
+
+    - name: "stanfordnlp/SHP"
+      split: "train"
+      weight: 0.3
+
+    - name: "argilla/ultrafeedback-binarized-preferences"
+      split: "train"
+      weight: 0.2
+
+# Data processing settings
+processing:
+  max_seq_len: 2048
+  tokenizer_path: "tokenizer"
+
+  # Filtering
+  min_length: 50
+  max_length: 100000
+
+  # Quality filtering
+  filter_duplicates: true
+  filter_low_quality: true
+  quality_threshold: 0.3
+
+  # Augmentation (optional)
+  augmentation:
+    enabled: false
+    techniques:
+      - "back_translation"
+      - "paraphrase"
+
+# Validation split
+validation:
+  split_ratio: 0.05
+  stratify_by_domain: true
