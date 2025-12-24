@@ -1,743 +1,808 @@
+"""
+SPARSA-LM 360M - Modern LLaMA-Style Transformer Architecture
+
+Features:
+- RMSNorm (instead of LayerNorm)
+- SwiGLU activation (instead of GELU/ReLU)
+- Rotary Position Embeddings (RoPE)
+- Grouped Query Attention (GQA)
+- Flash Attention 2 support
+- Sliding Window Attention
+- KV-Cache for efficient inference
+
+This code belongs to EllanorAI and is licensed under the EllanorAI Proprietary License.
+"""
+
 import math
 import logging
+from dataclasses import dataclass
+from typing import Optional, Tuple, List, Dict, Any, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-import transformers
-from typing import Dict, Optional, List, Tuple, Union
-from torch.optim.lr_scheduler import LambdaLR
-import numpy as np
-import random
 
-"""This code belongs to EllanorAI and is licensed under the EllanorAI Proprietary License."""
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn.bert_padding import unpad_input, pad_input
+    FLASH_ATTN_AVAILABLE = True
+except ImportError:
+    FLASH_ATTN_AVAILABLE = False
+    logging.warning("Flash Attention not available. Using standard attention.")
 
-########################################################################################
-# TransformerConfig
-########################################################################################
+try:
+    import triton
+    import triton.language as tl
+    TRITON_AVAILABLE = True
+except ImportError:
+    TRITON_AVAILABLE = False
 
-class TransformerConfig:
-    def __init__(
-        self,
-        # Model Architecture
-        vocab_size: int,
-        d_model: int,  # hidden_dim in config
-        num_layers: int,
-        num_heads: int,
-        d_ff: int,  # ff_dim in config
-        max_seq_len: int,
-        dropout: float,
 
-        # Noise insertions
-        noise_type: str = "mask",
-        noise_prob: float = 0.0,
-        
-        # Attention Mechanisms
-        use_rope: bool = True,
-        window_size: int = 8,           # Updated default window_size = 8
-        global_tokens: int = 0,
-        
-        # Architecture Options
-        normalize_before: bool = True,  # Using pre-norm architecture (replaces prenorm)
-        tie_embeddings: bool = False,
-        
-        # Training Features
-        use_checkpointing: bool = True,
-        use_regularization: bool = True,
-        use_mixed_precision: bool = True,
-        label_smoothing: float = 0.1,
-        l2_reg: float = 0.01,
-        max_grad_norm: float = 1.0,
-        
-        # Optimization
-        learning_rate: float = 1e-4,
-        weight_decay: float = 0.1,
-        warmup_ratio: float = 0.1,
-        scheduler_type: str = "cosine_with_min_lr",
-        lr_scheduler_kwargs: dict = None,
+@dataclass
+class SPARSAConfig:
+    """Configuration for SPARSA-LM 360M Model."""
 
-        init_scale: float = 0.02,
-        layer_norm_eps: float = 1e-5,
-        
-        # Special Tokens
-        pad_token_id: int = 0,
-        
-        # Model Behavior
-        activation: str = "gelu",  # Options: "gelu", "relu", "silu"
-        
-        # Device
-        device: Optional[torch.device] = None,
-        
-        # Additional parameters
-        use_reentrant: bool = True,
-        initializer_range: float = 0.02,   # New: weight initialization range
-        use_layer_norm: bool = True         # New: explicitly enable layer norm
-    ):
-        """Initialize transformer configuration with validation."""
-        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-        assert activation in ["gelu", "relu", "silu"], f"Unsupported activation: {activation}"
-        
-        self.vocab_size = vocab_size
-        self.d_model = d_model
-        self.num_layers = num_layers
-        self.num_heads = num_heads
-        self.d_ff = d_ff
-        self.max_seq_len = max_seq_len
-        self.dropout = dropout
-        self.init_scale = init_scale
-        self.layer_norm_eps = layer_norm_eps
-        
-        self.use_rope = use_rope
-        self.window_size = window_size
-        self.global_tokens = global_tokens
-        
-        self.normalize_before = normalize_before  # pre-norm ordering
-        self.tie_embeddings = tie_embeddings
-        
-        self.use_checkpointing = use_checkpointing
-        self.use_regularization = use_regularization
-        self.use_mixed_precision = use_mixed_precision
-        self.label_smoothing = label_smoothing
-        self.l2_reg = l2_reg
-        self.max_grad_norm = max_grad_norm
-        
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
-        self.warmup_ratio = warmup_ratio
-        self.scheduler_type = scheduler_type
-        self.lr_scheduler_kwargs = lr_scheduler_kwargs or {"min_lr": 1e-6}
-        
-        self.pad_token_id = pad_token_id
-        
-        self.activation = activation
+    # Model dimensions
+    vocab_size: int = 32000
+    hidden_dim: int = 1024
+    num_layers: int = 28
+    num_heads: int = 16
+    num_kv_heads: int = 8  # For GQA
+    ff_dim: int = 4096
+    max_seq_len: int = 2048
 
-        self.noise_type = noise_type
-        self.noise_prob = noise_prob
+    # Normalization
+    rms_norm_eps: float = 1e-6
 
-        assert window_size > 0, "Window size must be positive"
-        assert window_size <= max_seq_len, "Window size cannot exceed max sequence length"
-        assert global_tokens >= 0, "Number of global tokens cannot be negative"
-        assert global_tokens <= max_seq_len, "Number of global tokens cannot exceed max sequence length"
+    # Attention
+    use_flash_attention: bool = True
+    use_sliding_window: bool = True
+    sliding_window_size: int = 512
+    attention_dropout: float = 0.0
+    attention_bias: bool = False
 
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.use_reentrant = use_reentrant
-        
-        # New parameters
-        self.initializer_range = initializer_range
-        self.use_layer_norm = use_layer_norm
+    # Position embeddings
+    rope_theta: float = 10000.0
+    rope_scaling: Optional[Dict[str, Any]] = None
 
-########################################################################################
-# Core Components - Positional Encodings
-########################################################################################
+    # Activation
+    use_swiglu: bool = True
+    hidden_act: str = "silu"
 
-class RotaryPositionalEmbedding(nn.Module):
-    """Rotary positional embedding with caching and vectorized computation."""
-    def __init__(self, dim: int, max_seq_len: int = 4096):
+    # Training
+    dropout: float = 0.0
+    use_checkpointing: bool = True
+    tie_embeddings: bool = False
+    initializer_range: float = 0.02
+
+    # Inference
+    use_cache: bool = True
+
+    # Device
+    device: Optional[torch.device] = None
+    dtype: torch.dtype = torch.bfloat16
+
+    # Special tokens
+    pad_token_id: int = 0
+    bos_token_id: int = 1
+    eos_token_id: int = 2
+
+    def __post_init__(self):
+        assert self.hidden_dim % self.num_heads == 0, "hidden_dim must be divisible by num_heads"
+        assert self.num_heads % self.num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
+        self.head_dim = self.hidden_dim // self.num_heads
+        self.num_kv_groups = self.num_heads // self.num_kv_heads
+        if self.device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization."""
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
         super().__init__()
-        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer('inv_freq', inv_freq)
-        self.max_seq_len = max_seq_len
-        self.seq_len_cached = -1
-        self.cos_cached = None
-        self.sin_cached = None
-
-    def forward(self, x: torch.Tensor, seq_len: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        if seq_len is None:
-            seq_len = x.size(1)
-        if seq_len > self.max_seq_len:
-            raise ValueError(f"Sequence length {seq_len} exceeds maximum allowed length {self.max_seq_len}")
-        if seq_len > self.seq_len_cached:
-            self.seq_len_cached = seq_len
-            t = torch.arange(seq_len, device=x.device).unsqueeze(1)
-            freqs = t * self.inv_freq.unsqueeze(0)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            emb = emb.unsqueeze(0).unsqueeze(0)
-            self.cos_cached = emb.cos()
-            self.sin_cached = emb.sin()
-        return self.cos_cached[:, :, :seq_len, :], self.sin_cached[:, :, :seq_len, :]
-
-class PositionalEncoding(nn.Module):
-    """Standard sinusoidal positional encoding with dropout."""
-    def __init__(self, d_model: int, max_len: int = 4096, dropout: float = 0.1):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        seq_len = x.size(1)
-        return self.dropout(x + self.pe[:, :seq_len])
+        input_dtype = x.dtype
+        x = x.float()
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
+        return (self.weight * x).to(input_dtype)
 
-########################################################################################
-# Sparse Multi-Head Attention with Optional KV Caching
-########################################################################################
 
-class SparseMultiHeadAttention(nn.Module):
-    """
-    Multi-Head Attention with Sparse Local Windowing and Optional Global Tokens.
-    """
-    def __init__(self, config, is_causal=False):
+class RotaryEmbedding(nn.Module):
+    """Rotary Position Embedding (RoPE) with optional scaling."""
+
+    def __init__(
+        self,
+        dim: int,
+        max_seq_len: int = 2048,
+        base: float = 10000.0,
+        scaling_factor: float = 1.0,
+        device: Optional[torch.device] = None,
+    ):
         super().__init__()
-        self.num_heads = config.num_heads
-        self.d_model = config.d_model
-        self.d_k = config.d_model // config.num_heads
-        self.window_size = config.window_size
-        self.global_tokens = config.global_tokens
-        self.is_causal = is_causal
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+        self.base = base
+        self.scaling_factor = scaling_factor
 
-        self.query = nn.Linear(config.d_model, config.d_model)
-        self.key = nn.Linear(config.d_model, config.d_model)
-        self.value = nn.Linear(config.d_model, config.d_model)
-        self.output = nn.Linear(config.d_model, config.d_model)
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self._set_cos_sin_cache(max_seq_len, device or torch.device("cpu"))
 
-        self.dropout = nn.Dropout(config.dropout)
-        self.softmax = nn.Softmax(dim=-1)
+    def _set_cos_sin_cache(self, seq_len: int, device: torch.device):
+        self.max_seq_len_cached = seq_len
+        t = torch.arange(seq_len, device=device, dtype=torch.float32) / self.scaling_factor
+        freqs = torch.outer(t, self.inv_freq.to(device))
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
 
-        for layer in [self.query, self.key, self.value, self.output]:
-            nn.init.xavier_uniform_(layer.weight, gain=1.0 / math.sqrt(self.d_k))
-            nn.init.zeros_(layer.bias)
+    def forward(self, x: torch.Tensor, seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        if seq_len > self.max_seq_len_cached:
+            self._set_cos_sin_cache(seq_len, x.device)
+        return (
+            self.cos_cached[:seq_len].to(x.dtype),
+            self.sin_cached[:seq_len].to(x.dtype),
+        )
 
-    def build_local_window_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
-        mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device=device)
-        for i in range(seq_len):
-            start = max(0, i - self.window_size)
-            end = min(seq_len, i + self.window_size + 1)
-            mask[i, start:end] = 1
-        if self.global_tokens > 0:
-            mask[:self.global_tokens, :] = 1
-            mask[:, :self.global_tokens] = 1
-        return mask
 
-    def forward(self, query, key, value, attn_mask=None, past_key_value=None, use_cache=False):
-        batch_size, new_seq_len, _ = query.size()
-        Q = self.query(query).view(batch_size, new_seq_len, self.num_heads, self.d_k).transpose(1, 2)
-        K = self.key(key).view(batch_size, new_seq_len, self.num_heads, self.d_k).transpose(1, 2)
-        V = self.value(value).view(batch_size, new_seq_len, self.num_heads, self.d_k).transpose(1, 2)
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
-        if past_key_value is not None:
-            past_K, past_V = past_key_value
-            K = torch.cat([past_K, K], dim=2)
-            V = torch.cat([past_V, V], dim=2)
+
+def apply_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    position_ids: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Apply rotary position embeddings to query and key tensors."""
+    if position_ids is not None:
+        cos = cos[position_ids].unsqueeze(1)
+        sin = sin[position_ids].unsqueeze(1)
+    else:
+        cos = cos.unsqueeze(0).unsqueeze(0)
+        sin = sin.unsqueeze(0).unsqueeze(0)
+
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+class KVCache:
+    """Key-Value cache for efficient autoregressive generation."""
+
+    def __init__(self):
+        self.key_cache: List[torch.Tensor] = []
+        self.value_cache: List[torch.Tensor] = []
+
+    def update(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer_idx: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if layer_idx >= len(self.key_cache):
+            self.key_cache.append(key)
+            self.value_cache.append(value)
         else:
-            past_K = torch.zeros((batch_size, self.num_heads, 0, self.d_k), device=K.device, dtype=K.dtype)
-            past_V = torch.zeros((batch_size, self.num_heads, 0, self.d_k), device=V.device, dtype=V.dtype)
+            self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key], dim=2)
+            self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value], dim=2)
 
-        next_key_value = (K, V) if use_cache else None
-        total_seq_len = K.size(2)
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
-        local_mask = self.build_local_window_mask(total_seq_len, device=query.device)
-        start = total_seq_len - new_seq_len
-        local_mask_slice = local_mask[start:start+new_seq_len, :]
-        scores = scores.masked_fill(local_mask_slice.unsqueeze(0).unsqueeze(0) == 0, float('-inf'))
+        return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
-        if self.is_causal:
-            full_causal = torch.triu(torch.ones(total_seq_len, total_seq_len, device=query.device), diagonal=1)
-            causal_slice = full_causal[start:start+new_seq_len, :]
-            scores = scores.masked_fill(causal_slice.unsqueeze(0).unsqueeze(0) == 1, float('-inf'))
+    def get_seq_len(self, layer_idx: int = 0) -> int:
+        if len(self.key_cache) <= layer_idx:
+            return 0
+        return self.key_cache[layer_idx].shape[2]
 
-        scores = self.softmax(scores)
-        scores = self.dropout(scores)
-        output = torch.matmul(scores, V)
-        output = output.transpose(1, 2).contiguous().view(batch_size, new_seq_len, self.d_model)
-        output = self.output(output)
-        return output, next_key_value
+    def reset(self):
+        self.key_cache = []
+        self.value_cache = []
 
-########################################################################################
-# Local Window Mask with Optional Global Tokens (Alternate Implementation)
-########################################################################################
 
-def build_local_window_mask(seq_len: int, window_size: int, global_tokens: int = 0, is_causal: bool = False, device: Optional[torch.device] = None) -> torch.Tensor:
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    mask = torch.zeros(seq_len, seq_len, dtype=torch.float, device=device)
-    for i in range(seq_len):
-        for j in range(seq_len):
-            if i < global_tokens or j < global_tokens:
-                continue
-            if abs(i - j) > window_size:
-                mask[i, j] = float('-inf')
-            if is_causal and j > i:
-                mask[i, j] = float('-inf')
-    return mask
+class GroupedQueryAttention(nn.Module):
+    """Grouped Query Attention (GQA) with Flash Attention support."""
 
-########################################################################################
-# Residual + LayerNorm with Optional Gradient Checkpointing
-########################################################################################
-
-class ResidualConnection(nn.Module):
-    """
-    Implements y = x + dropout(sublayer(LN(x))) with additional error checking.
-    """
-    def __init__(self, d_model, dropout=0.1, use_checkpointing=False, use_reentrant=False, layer_norm_eps=1e-5):
-        super().__init__()
-        self.norm = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.dropout = nn.Dropout(dropout)
-        self.use_checkpointing = use_checkpointing
-        self.use_reentrant = use_reentrant
-
-    def forward(self, x, sublayer):
-        def forward_sublayer(normed_x):
-            return sublayer(normed_x)
-        
-        if not x.isfinite().all():
-            logging.warning("Non-finite values in residual input; replacing with numerical safe values.")
-            x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
-        
-        normed = self.norm(x)
-        if self.use_checkpointing and normed.requires_grad:
-            sublayer_output = checkpoint(forward_sublayer, normed, use_reentrant=self.use_reentrant)
-        else:
-            sublayer_output = sublayer(normed)
-        
-        if not sublayer_output.isfinite().all():
-            logging.warning("Non-finite values in sublayer output; replacing with numerical safe values.")
-            sublayer_output = torch.nan_to_num(sublayer_output, nan=0.0, posinf=1e4, neginf=-1e4)
-        
-        out = x + self.dropout(sublayer_output)
-        if not out.isfinite().all():
-            logging.warning("Non-finite values in residual output; replacing with numerical safe values.")
-            out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
-        return out
-
-########################################################################################
-# Feed Forward
-########################################################################################
-
-class FeedForward(nn.Module):
-    def __init__(self, config: TransformerConfig):
-        super().__init__()
-        self.linear1 = nn.Linear(config.d_model, config.d_ff)
-        self.linear2 = nn.Linear(config.d_ff, config.d_model)
-        self.dropout = nn.Dropout(config.dropout)
-        self.activation = {
-            'relu': F.relu,
-            'gelu': F.gelu,
-            'silu': F.silu
-        }[config.activation.lower()]
-
-    def forward(self, x):
-        x = self.linear1(x)
-        x = self.activation(x)
-        x = self.dropout(x)
-        x = self.linear2(x)
-        return x
-
-########################################################################################
-# Encoder Block with Sparse Attention, Global Tokens, and Checkpointing
-########################################################################################
-
-class EncoderBlock(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.self_attn = SparseMultiHeadAttention(config)
-        self.feed_forward = FeedForward(config)
-        self.self_attn_res = ResidualConnection(config.d_model, config.dropout)
-        self.ff_res = ResidualConnection(config.d_model, config.dropout)
-
-    def forward(self, x, src_mask=None, past_key_value=None, use_cache=False):
-        next_kv = None
-        def sa_sublayer(normed_x):
-            nonlocal next_kv
-            out, new_kv = self.self_attn(normed_x, normed_x, normed_x,
-                                          attn_mask=src_mask,
-                                          past_key_value=past_key_value,
-                                          use_cache=use_cache)
-            next_kv = new_kv
-            return out
-        x = self.self_attn_res(x, sa_sublayer)
-        x = self.ff_res(x, self.feed_forward)
-        return x, next_kv
-
-########################################################################################
-# Decoder Block with Sparse Self-Attention, Cross-Attention, Checkpointing, and Cache
-########################################################################################
-
-class DecoderBlock(nn.Module):
-    def __init__(self, config: TransformerConfig):
-        super().__init__()
-        self.self_attn_res = ResidualConnection(config.d_model, config.dropout, config.use_checkpointing, config.use_reentrant)
-        self.self_attn = SparseMultiHeadAttention(config, is_causal=True)
-        self.cross_attn_res = ResidualConnection(config.d_model, config.dropout, config.use_checkpointing, config.use_reentrant)
-        self.cross_attn = SparseMultiHeadAttention(config)
-        self.ff_res = ResidualConnection(config.d_model, config.dropout, config.use_checkpointing, config.use_reentrant)
-        self.feed_forward = FeedForward(config)
-
-    def forward(self, x, encoder_output, tgt_mask=None, src_mask=None, past_key_value=None, use_cache=False):
-        past_self_k = past_self_v = past_cross_k = past_cross_v = None
-        if past_key_value is not None:
-            if len(past_key_value) == 2:
-                past_self_k, past_self_v = past_key_value
-            elif len(past_key_value) == 4:
-                past_self_k, past_self_v, past_cross_k, past_cross_v = past_key_value
-        next_self_kv = None
-        def self_attn_sublayer(normed_x):
-            nonlocal next_self_kv
-            out, new_self_kv = self.self_attn(normed_x, normed_x, normed_x,
-                                               attn_mask=tgt_mask,
-                                               past_key_value=(past_self_k, past_self_v),
-                                               use_cache=use_cache)
-            next_self_kv = new_self_kv
-            return out
-        x = self.self_attn_res(x, self_attn_sublayer)
-        next_cross_kv = None
-        def cross_attn_sublayer(normed_x):
-            nonlocal next_cross_kv
-            out, new_cross_kv = self.cross_attn(normed_x, encoder_output, encoder_output,
-                                                 attn_mask=src_mask,
-                                                 past_key_value=(past_cross_k, past_cross_v),
-                                                 use_cache=use_cache)
-            next_cross_kv = new_cross_kv
-            return out
-        x = self.cross_attn_res(x, cross_attn_sublayer)
-        x = self.ff_res(x, self.feed_forward)
-        next_key_value = None
-        if use_cache:
-            next_key_value = (
-                next_self_kv[0] if next_self_kv else None,
-                next_self_kv[1] if next_self_kv else None,
-                next_cross_kv[0] if next_cross_kv else None,
-                next_cross_kv[1] if next_cross_kv else None
-            )
-        return x, next_key_value
-
-########################################################################################
-# Full Encoder
-########################################################################################
-
-class Encoder(nn.Module):
-    def __init__(self, config: TransformerConfig):
-        super().__init__()
-        self.layers = nn.ModuleList([EncoderBlock(config) for _ in range(config.num_layers)])
-        self.norm = nn.LayerNorm(config.d_model) if config.use_layer_norm else nn.Identity()
-    
-    def forward(self, x, src_mask=None, past_key_values=None, use_cache=False):
-        next_past_key_values = []
-        batch_size = x.size(0)
-        for i, layer in enumerate(self.layers):
-            if past_key_values is not None and i < len(past_key_values):
-                past_kv = past_key_values[i]
-            else:
-                num_heads = layer.self_attn.num_heads
-                d_k = layer.self_attn.d_k
-                past_kv = (
-                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype),
-                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype)
-                )
-            x, new_kv = layer(x, src_mask=src_mask, past_key_value=past_kv, use_cache=use_cache)
-            next_past_key_values.append(new_kv)
-        x = self.norm(x)
-        return x, next_past_key_values if use_cache else None
-
-########################################################################################
-# Full Decoder
-########################################################################################
-
-class Decoder(nn.Module):
-    def __init__(self, config: TransformerConfig):
-        super().__init__()
-        self.layers = nn.ModuleList([DecoderBlock(config) for _ in range(config.num_layers)])
-        self.norm = nn.LayerNorm(config.d_model) if config.use_layer_norm else nn.Identity()
-
-    def forward(self, x, encoder_output, tgt_mask=None, src_mask=None, past_key_values=None, use_cache=False):
-        next_past_key_values = []
-        batch_size = x.size(0)
-        for i, layer in enumerate(self.layers):
-            if past_key_values is not None and i < len(past_key_values):
-                past_kv = past_key_values[i]
-            else:
-                num_heads = layer.self_attn.num_heads
-                d_k = layer.self_attn.d_k
-                self_past = (
-                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype),
-                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype)
-                )
-                cross_past = (
-                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype),
-                    torch.zeros(batch_size, num_heads, 0, d_k, device=x.device, dtype=x.dtype)
-                )
-                past_kv = (self_past[0], self_past[1], cross_past[0], cross_past[1])
-            x, new_kv = layer(x, encoder_output, tgt_mask=tgt_mask, src_mask=src_mask, past_key_value=past_kv, use_cache=use_cache)
-            next_past_key_values.append(new_kv)
-        x = self.norm(x)
-        return x, next_past_key_values if use_cache else None
-
-########################################################################################
-# Noise Injection Function
-########################################################################################
-
-def add_noise_to_input(tokens: torch.Tensor, noise_type="mask", mask_token_id=4, prob=0.0, vocab_size=None, pad_token_id=0) -> torch.Tensor:
-    """
-    Apply noise directly on GPU.
-    For 'delete' noise, tokens are re-padded per row.
-    """
-    noisy_tokens = tokens.clone()
-    batch_size, seq_len = noisy_tokens.shape
-
-    if noise_type == "mask":
-        mask = torch.rand_like(noisy_tokens.float()) < prob
-        noisy_tokens = torch.where(mask, torch.tensor(mask_token_id, device=tokens.device), noisy_tokens)
-    elif noise_type == "delete":
-        keep_mask = (torch.rand_like(noisy_tokens.float()) > prob)
-        new_noisy = torch.full_like(noisy_tokens, pad_token_id)
-        for i in range(batch_size):
-            row = noisy_tokens[i]
-            row_keep = keep_mask[i]
-            row_kept = row[row_keep]
-            length_to_copy = min(seq_len, row_kept.size(0))
-            new_noisy[i, :length_to_copy] = row_kept[:length_to_copy]
-        noisy_tokens = new_noisy
-    elif noise_type == "permute":
-        perm = torch.rand(batch_size, seq_len, device=tokens.device).argsort(dim=1)
-        noisy_tokens = noisy_tokens.gather(1, perm)
-    elif noise_type == "substitute":
-        if vocab_size is None:
-            raise ValueError("Must provide vocab_size for 'substitute' noise.")
-        mask = torch.rand_like(noisy_tokens.float()) < prob
-        random_tokens = torch.randint(low=0, high=vocab_size, size=noisy_tokens.shape, device=noisy_tokens.device)
-        noisy_tokens = torch.where(mask, random_tokens, noisy_tokens)
-    return noisy_tokens
-
-########################################################################################
-# Full Encoder–Decoder Transformer Model
-########################################################################################
-
-class Transformer(nn.Module):
-    def __init__(self, config: TransformerConfig):
+    def __init__(self, config: SPARSAConfig, layer_idx: int = 0):
         super().__init__()
         self.config = config
-        self.device = config.device
-        
-        self.embedding = nn.Embedding(config.vocab_size, config.d_model)
-        
-        if not config.use_rope:
-            self.pos_encoding = PositionalEncoding(config.d_model, config.max_seq_len, config.dropout)
-        
-        self.encoder = Encoder(config)
-        self.decoder = Decoder(config)
-        
-        self.generator = nn.Linear(config.d_model, config.vocab_size)
+        self.layer_idx = layer_idx
+
+        self.hidden_dim = config.hidden_dim
+        self.num_heads = config.num_heads
+        self.num_kv_heads = config.num_kv_heads
+        self.head_dim = config.head_dim
+        self.num_kv_groups = config.num_kv_groups
+
+        self.q_proj = nn.Linear(self.hidden_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
+        self.k_proj = nn.Linear(self.hidden_dim, self.num_kv_heads * self.head_dim, bias=config.attention_bias)
+        self.v_proj = nn.Linear(self.hidden_dim, self.num_kv_heads * self.head_dim, bias=config.attention_bias)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_dim, bias=config.attention_bias)
+
+        self.rotary_emb = RotaryEmbedding(
+            self.head_dim,
+            max_seq_len=config.max_seq_len,
+            base=config.rope_theta,
+        )
+
+        self.use_flash_attention = config.use_flash_attention and FLASH_ATTN_AVAILABLE
+        self.sliding_window = config.sliding_window_size if config.use_sliding_window else None
+        self.attention_dropout = config.attention_dropout
+
+    def _repeat_kv(self, hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+        """Repeat KV heads for grouped query attention."""
+        batch, num_kv_heads, seq_len, head_dim = hidden_states.shape
+        if n_rep == 1:
+            return hidden_states
+        hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_kv_heads, n_rep, seq_len, head_dim)
+        return hidden_states.reshape(batch, num_kv_heads * n_rep, seq_len, head_dim)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        past_key_value: Optional[KVCache] = None,
+        use_cache: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[KVCache]]:
+        batch_size, seq_len, _ = hidden_states.shape
+
+        # Project to Q, K, V
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        # Reshape for multi-head attention
+        query_states = query_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        # Get position embeddings and apply RoPE
+        cos, sin = self.rotary_emb(query_states, seq_len=seq_len + (past_key_value.get_seq_len(self.layer_idx) if past_key_value else 0))
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+        # Update KV cache
+        if past_key_value is not None:
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
+
+        # Repeat KV for GQA
+        key_states = self._repeat_kv(key_states, self.num_kv_groups)
+        value_states = self._repeat_kv(value_states, self.num_kv_groups)
+
+        # Compute attention
+        if self.use_flash_attention:
+            attn_output = self._flash_attention(query_states, key_states, value_states, attention_mask)
+        else:
+            attn_output = self._standard_attention(query_states, key_states, value_states, attention_mask)
+
+        # Reshape and project output
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, past_key_value
+
+    def _flash_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Flash Attention 2 implementation."""
+        batch_size, num_heads, seq_len, head_dim = query.shape
+
+        # Reshape for flash attention: (batch, seq, heads, head_dim)
+        query = query.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+
+        # Flash attention with optional sliding window
+        attn_output = flash_attn_func(
+            query,
+            key,
+            value,
+            dropout_p=self.attention_dropout if self.training else 0.0,
+            causal=True,
+            window_size=(self.sliding_window, self.sliding_window) if self.sliding_window else (-1, -1),
+        )
+
+        return attn_output.transpose(1, 2)
+
+    def _standard_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Standard scaled dot-product attention."""
+        batch_size, num_heads, seq_len, head_dim = query.shape
+        kv_seq_len = key.shape[2]
+
+        # Compute attention scores
+        attn_weights = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(head_dim)
+
+        # Apply causal mask
+        causal_mask = torch.triu(
+            torch.ones(seq_len, kv_seq_len, device=query.device, dtype=torch.bool),
+            diagonal=kv_seq_len - seq_len + 1
+        )
+        attn_weights = attn_weights.masked_fill(causal_mask, float('-inf'))
+
+        # Apply sliding window mask if enabled
+        if self.sliding_window is not None:
+            window_mask = torch.ones(seq_len, kv_seq_len, device=query.device, dtype=torch.bool)
+            for i in range(seq_len):
+                start = max(0, kv_seq_len - seq_len + i - self.sliding_window)
+                end = kv_seq_len - seq_len + i + 1
+                window_mask[i, start:end] = False
+            attn_weights = attn_weights.masked_fill(window_mask, float('-inf'))
+
+        # Apply attention mask
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+
+        # Softmax and dropout
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+        attn_weights = F.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+
+        # Compute output
+        attn_output = torch.matmul(attn_weights, value)
+
+        return attn_output
+
+
+class SwiGLU(nn.Module):
+    """SwiGLU activation function (GLU variant with SiLU/Swish)."""
+
+    def __init__(self, hidden_dim: int, ff_dim: int, bias: bool = False):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_dim, ff_dim, bias=bias)
+        self.up_proj = nn.Linear(hidden_dim, ff_dim, bias=bias)
+        self.down_proj = nn.Linear(ff_dim, hidden_dim, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
+class TransformerBlock(nn.Module):
+    """Single transformer block with pre-norm architecture."""
+
+    def __init__(self, config: SPARSAConfig, layer_idx: int = 0):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+
+        self.input_layernorm = RMSNorm(config.hidden_dim, eps=config.rms_norm_eps)
+        self.self_attn = GroupedQueryAttention(config, layer_idx)
+        self.post_attention_layernorm = RMSNorm(config.hidden_dim, eps=config.rms_norm_eps)
+
+        if config.use_swiglu:
+            self.mlp = SwiGLU(config.hidden_dim, config.ff_dim)
+        else:
+            self.mlp = nn.Sequential(
+                nn.Linear(config.hidden_dim, config.ff_dim),
+                nn.SiLU(),
+                nn.Linear(config.ff_dim, config.hidden_dim),
+            )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        past_key_value: Optional[KVCache] = None,
+        use_cache: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[KVCache]]:
+        # Self-attention with residual
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, past_key_value = self.self_attn(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            use_cache=use_cache,
+        )
+        hidden_states = residual + hidden_states
+
+        # MLP with residual
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        return hidden_states, past_key_value
+
+
+class SPARSALM(nn.Module):
+    """
+    SPARSA-LM 360M: Modern LLaMA-Style Causal Language Model.
+
+    A decoder-only transformer with:
+    - RMSNorm for layer normalization
+    - SwiGLU activation in the MLP
+    - Rotary Position Embeddings (RoPE)
+    - Grouped Query Attention (GQA)
+    - Flash Attention 2 support
+    - Sliding window attention
+    """
+
+    def __init__(self, config: SPARSAConfig):
+        super().__init__()
+        self.config = config
+        self.vocab_size = config.vocab_size
+        self.hidden_dim = config.hidden_dim
+
+        # Token embeddings
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_dim)
+
+        # Transformer layers
+        self.layers = nn.ModuleList([
+            TransformerBlock(config, layer_idx=i) for i in range(config.num_layers)
+        ])
+
+        # Final layer norm
+        self.norm = RMSNorm(config.hidden_dim, eps=config.rms_norm_eps)
+
+        # Output projection (language modeling head)
+        self.lm_head = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)
+
+        # Weight tying (optional)
         if config.tie_embeddings:
-            self.generator.weight = self.embedding.weight
-        
-        self._reset_parameters()
-        
-        self.scaler = torch.amp.GradScaler(
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            enabled=config.use_mixed_precision
-        )
-        self.metrics = {
-            'train': {'loss': [], 'accuracy': [], 'perplexity': []},
-            'val': {'loss': [], 'accuracy': [], 'perplexity': []}
-        }
-        self.best_val_loss = float('inf')
+            self.lm_head.weight = self.embed_tokens.weight
 
-    def _reset_parameters(self):
-        for name, p in self.named_parameters():
-            if p.dim() > 1:
-                if 'embedding' in name:
-                    nn.init.normal_(p, mean=0.0, std=self.config.init_scale)
-                elif 'linear' in name or 'w_' in name:
-                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
-                elif 'norm' in name:
-                    if 'weight' in name:
-                        nn.init.ones_(p)
-                    elif 'bias' in name:
-                        nn.init.zeros_(p)
+        # Initialize weights
+        self.apply(self._init_weights)
+
+        # Gradient checkpointing flag
+        self.gradient_checkpointing = config.use_checkpointing
+
+    def _init_weights(self, module: nn.Module):
+        std = self.config.initializer_range
+        if isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.embed_tokens
+
+    def set_input_embeddings(self, value: nn.Embedding):
+        self.embed_tokens = value
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        past_key_values: Optional[KVCache] = None,
+        use_cache: bool = False,
+        output_hidden_states: bool = False,
+        return_dict: bool = True,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        batch_size, seq_len = input_ids.shape
+
+        # Get embeddings
+        hidden_states = self.embed_tokens(input_ids)
+
+        # Prepare position ids
+        if position_ids is None:
+            past_len = past_key_values.get_seq_len() if past_key_values else 0
+            position_ids = torch.arange(
+                past_len, past_len + seq_len, device=input_ids.device
+            ).unsqueeze(0).expand(batch_size, -1)
+
+        # Prepare attention mask for Flash Attention
+        if attention_mask is not None and not (self.config.use_flash_attention and FLASH_ATTN_AVAILABLE):
+            attention_mask = self._prepare_attention_mask(attention_mask, seq_len)
+
+        # Initialize KV cache if needed
+        if use_cache and past_key_values is None:
+            past_key_values = KVCache()
+
+        # Store hidden states if requested
+        all_hidden_states = () if output_hidden_states else None
+
+        # Forward through transformer layers
+        for layer in self.layers:
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+
+            if self.gradient_checkpointing and self.training:
+                hidden_states, past_key_values = checkpoint(
+                    layer,
+                    hidden_states,
+                    attention_mask,
+                    position_ids,
+                    past_key_values,
+                    use_cache,
+                    use_reentrant=False,
+                )
             else:
-                nn.init.zeros_(p)
+                hidden_states, past_key_values = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_values,
+                    use_cache=use_cache,
+                )
 
-    def forward(self, src: torch.Tensor, tgt: Optional[torch.Tensor] = None,
-                attention_mask: Optional[torch.Tensor] = None, tgt_mask: Optional[torch.Tensor] = None,
-                past_key_values: Optional[List[Tuple]] = None, use_cache: bool = False
-               ) -> Union[torch.Tensor, Tuple[torch.Tensor, Tuple]]:
-        """
-        Forward pass:
-          - Encoder receives a noisy version of src during training.
-          - Decoder receives clean tgt tokens to learn reconstruction.
-        """
-        if src.dtype != torch.long:
-            print(f"🚨 WARNING: Model received `src` with dtype {src.dtype}, forcing conversion to long.")
-            src = src.to(torch.long)
-        if tgt is not None and tgt.dtype != torch.long:
-            print(f"🚨 WARNING: Model received `tgt` with dtype {tgt.dtype}, forcing conversion to long.")
-            tgt = tgt.to(torch.long)
+        # Final layer norm
+        hidden_states = self.norm(hidden_states)
 
-        if not src.isfinite().all():
-            src = torch.nan_to_num(src)
-            print("Warning: Non-finite values in source tokens")
-        
-        # --- Encoder: Apply noise to source tokens only during training ---
-        if self.training and getattr(self.config, 'use_noise_injection', False):
-            src_noisy = add_noise_to_input(
-                src,
-                noise_type=self.config.noise_type,
-                mask_token_id=self.config.pad_token_id,
-                prob=self.config.noise_prob
-            )
-        else:
-            src_noisy = src
-        
-        with torch.amp.autocast(
-            device_type="cuda" if torch.cuda.is_available() else "cpu",
-            enabled=self.config.use_mixed_precision
-        ):
-            enc_inp = self.embedding(src_noisy)
-            if not self.config.use_rope:
-                enc_inp = self.pos_encoding(enc_inp)
-            if self.training:
-                enc_inp = enc_inp + torch.randn_like(enc_inp) * 1e-5
-            
-            encoder_past = None if past_key_values is None else past_key_values[0]
-            encoder_output, enc_past = self.encoder(enc_inp, src_mask=attention_mask, past_key_values=encoder_past, use_cache=use_cache)
-            if not encoder_output.isfinite().all():
-                print("Warning: Non-finite values in encoder output")
-                encoder_output = torch.nan_to_num(encoder_output, nan=0.0, posinf=1e4, neginf=-1e4)
-            
-            # --- Decoder: Always use clean target tokens ---
-            if tgt is not None:
-                dec_inp = self.embedding(tgt)
-                if not self.config.use_rope:
-                    dec_inp = self.pos_encoding(dec_inp)
-                decoder_past = None if past_key_values is None else past_key_values[1]
-                decoder_output, dec_past = self.decoder(dec_inp, encoder_output, tgt_mask=tgt_mask, src_mask=attention_mask, past_key_values=decoder_past, use_cache=use_cache)
-                logits = self.generator(decoder_output) / math.sqrt(self.config.d_model)
-                if use_cache:
-                    return logits, (enc_past, dec_past)
-                return logits
-            return encoder_output
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
 
-    def configure_optimizer(self, config: TransformerConfig):
-        decay_params = []
-        no_decay_params = []
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            if 'bias' in name or 'norm' in name or 'embedding' in name:
-                no_decay_params.append(param)
-            else:
-                decay_params.append(param)
-        optim_groups = [
-            {'params': decay_params, 'weight_decay': config.weight_decay},
-            {'params': no_decay_params, 'weight_decay': 0.0}
-        ]
-        optimizer = torch.optim.AdamW(
-            optim_groups,
-            lr=config.learning_rate,
-            betas=(0.9, 0.999),
-            eps=1e-8
+        # Compute logits
+        logits = self.lm_head(hidden_states)
+
+        if return_dict:
+            return {
+                "logits": logits,
+                "past_key_values": past_key_values,
+                "hidden_states": all_hidden_states,
+            }
+
+        if use_cache:
+            return logits, past_key_values
+        return logits
+
+    def _prepare_attention_mask(
+        self,
+        attention_mask: torch.Tensor,
+        seq_len: int,
+    ) -> torch.Tensor:
+        """Prepare 4D attention mask for standard attention."""
+        # Expand mask to 4D: (batch, 1, seq, seq)
+        extended_mask = attention_mask[:, None, None, :]
+        extended_mask = extended_mask.expand(-1, -1, seq_len, -1)
+
+        # Create causal mask
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=attention_mask.device),
+            diagonal=1
+        ).bool()
+
+        # Combine masks
+        extended_mask = extended_mask.masked_fill(causal_mask, 0)
+        extended_mask = (1.0 - extended_mask) * torch.finfo(torch.float32).min
+
+        return extended_mask.to(attention_mask.dtype)
+
+    def compute_loss(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        reduction: str = "mean",
+    ) -> torch.Tensor:
+        """Compute cross-entropy loss for language modeling."""
+        # Shift for next-token prediction
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+
+        # Flatten for loss computation
+        loss_fct = nn.CrossEntropyLoss(
+            ignore_index=self.config.pad_token_id,
+            reduction=reduction,
         )
-        return optimizer
-    
-    def training_step(self, batch, optimizer) -> Dict[str, float]:
-        self.train()
-        metrics = {}
-        with torch.amp.autocast(enabled=self.config.use_mixed_precision):
-            outputs = self(
-                src=batch['encoder_input_ids'],
-                tgt=batch['decoder_input_ids'],
-                attention_mask=batch.get('encoder_attention_mask'),
-                tgt_mask=batch.get('decoder_attention_mask')
-            )
-            loss = self.compute_loss(outputs, batch['labels'])
-            metrics['loss'] = loss.item()
-            if self.config.use_regularization:
-                reg_loss = self.compute_regularization()
-                loss = loss + reg_loss
-                metrics['reg_loss'] = reg_loss.item()
-        self.scaler.scale(loss).backward()
-        self.scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), self.config.max_grad_norm)
-        metrics['grad_norm'] = grad_norm.item()
-        self.scaler.step(optimizer)
-        self.scaler.update()
-        optimizer.zero_grad(set_to_none=True)
-        return metrics
 
-    def validation_step(self, batch) -> Dict[str, float]:
+        loss = loss_fct(
+            shift_logits.view(-1, self.vocab_size),
+            shift_labels.view(-1),
+        )
+
+        return loss
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int = 128,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.0,
+        do_sample: bool = True,
+        eos_token_id: Optional[int] = None,
+        pad_token_id: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Generate text autoregressively with KV caching."""
         self.eval()
-        metrics = {}
-        with torch.no_grad():
-            outputs = self(
-                src=batch['input_ids'],
-                tgt=batch['labels'],
-                src_mask=batch.get('attention_mask'),
-                tgt_mask=self._generate_square_subsequent_mask(batch['labels'].size(1))
+        eos_token_id = eos_token_id or self.config.eos_token_id
+        pad_token_id = pad_token_id or self.config.pad_token_id
+
+        batch_size = input_ids.shape[0]
+        kv_cache = KVCache()
+
+        # Track which sequences have finished
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+
+        for _ in range(max_new_tokens):
+            # Forward pass with KV cache
+            outputs = self.forward(
+                input_ids[:, -1:] if kv_cache.get_seq_len() > 0 else input_ids,
+                past_key_values=kv_cache,
+                use_cache=True,
             )
-            if outputs is None:
-                print("Validation Step - Model output is None! Skipping this batch...")
-                return {"loss": float("inf"), "accuracy": 0.0}
-            if isinstance(outputs, tuple):
-                outputs = outputs[0]
-            metrics['loss'] = self.compute_loss(outputs, batch['labels']).item()
-            if outputs is not None:
-                metrics.update(self.compute_metrics(outputs, batch['labels']))
-        return metrics
 
-    def compute_regularization(self) -> torch.Tensor:
-        reg_loss = 0.0
-        if self.config.l2_reg > 0:
-            for param in self.parameters():
-                reg_loss += torch.norm(param, p=2)
-            reg_loss *= self.config.l2_reg
-        return reg_loss
+            logits = outputs["logits"][:, -1, :]
+            kv_cache = outputs["past_key_values"]
 
-    def compute_metrics(self, outputs, labels) -> Dict[str, float]:
-        metrics = {}
-        predictions = outputs.argmax(dim=-1)
-        mask = labels != self.config.pad_token_id
-        correct = (predictions == labels) & mask
-        denominator = mask.sum().float().clamp(min=1)
-        metrics['accuracy'] = correct.sum().float() / denominator
-        metrics['perplexity'] = torch.exp(self.compute_loss(outputs, labels))
-        return metrics
+            # Apply temperature
+            if temperature != 1.0:
+                logits = logits / temperature
 
-    def compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        outputs = outputs.float() / math.sqrt(self.config.d_model)
-        log_probs = F.log_softmax(outputs, dim=-1, dtype=torch.float32)
-        if self.config.label_smoothing > 0:
-            smooth_target = torch.full_like(log_probs, self.config.label_smoothing / (self.config.vocab_size - 1))
-            smooth_target.scatter_(-1, labels.unsqueeze(-1), 1.0 - self.config.label_smoothing)
-            pad_mask = (labels != self.config.pad_token_id).float().unsqueeze(-1)
-            loss = -(smooth_target * log_probs * pad_mask).sum(dim=-1)
-        else:
-            loss = F.nll_loss(
-                log_probs.view(-1, self.config.vocab_size),
-                labels.view(-1),
-                ignore_index=self.config.pad_token_id,
-                reduction='none'
+            # Apply repetition penalty
+            if repetition_penalty != 1.0:
+                for i in range(batch_size):
+                    for token_id in set(input_ids[i].tolist()):
+                        if logits[i, token_id] > 0:
+                            logits[i, token_id] /= repetition_penalty
+                        else:
+                            logits[i, token_id] *= repetition_penalty
+
+            # Apply top-k filtering
+            if top_k > 0:
+                indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+                logits[indices_to_remove] = float('-inf')
+
+            # Apply top-p (nucleus) filtering
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = float('-inf')
+
+            # Sample or greedy decode
+            if do_sample:
+                probs = F.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = torch.argmax(logits, dim=-1, keepdim=True)
+
+            # Update finished sequences
+            finished = finished | (next_token.squeeze(-1) == eos_token_id)
+
+            # Replace finished tokens with pad
+            next_token = torch.where(
+                finished.unsqueeze(-1),
+                torch.full_like(next_token, pad_token_id),
+                next_token,
             )
-        pad_mask = (labels != self.config.pad_token_id).float()
-        return (loss * pad_mask).sum() / pad_mask.sum().clamp(min=1)
-    
-    @staticmethod
-    def get_scheduler(optimizer, config: TransformerConfig, num_training_steps: int):
-        num_warmup_steps = int(num_training_steps * config.warmup_ratio)
-        if config.scheduler_type in ["cosine_warmup", "cosine_with_min_lr"]:
-            default_min_lr = 0.0 if config.scheduler_type == "cosine_warmup" else 1e-6
-            min_lr = config.lr_scheduler_kwargs.get("min_lr", default_min_lr)
-            def lr_lambda(step):
-                if step < num_warmup_steps:
-                    return float(step) / float(max(1, num_warmup_steps))
-                else:
-                    progress = float(step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-                    return min_lr + (config.learning_rate - min_lr) * 0.5 * (1.0 + np.cos(np.pi * progress))
-            return LambdaLR(optimizer, lr_lambda)
-        elif config.scheduler_type == "linear_warmup":
-            return transformers.get_linear_schedule_with_warmup(
-                optimizer,
-                num_warmup_steps=num_warmup_steps,
-                num_training_steps=num_training_steps
-            )
-        else:
-            raise ValueError(f"Unknown scheduler type: {config.scheduler_type}")
 
-    @staticmethod
-    def _generate_square_subsequent_mask(sz: int) -> torch.Tensor:
-        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
-        return mask
+            # Append to sequence
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+
+            # Stop if all sequences finished
+            if finished.all():
+                break
+
+        return input_ids
+
+    def save_pretrained(self, save_directory: str):
+        """Save model and config to directory (HuggingFace Hub compatible)."""
+        import os
+        import json
+
+        os.makedirs(save_directory, exist_ok=True)
+
+        # Save model weights
+        torch.save(self.state_dict(), os.path.join(save_directory, "pytorch_model.bin"))
+
+        # Save config
+        config_dict = {
+            "architecture": "SPARSALM",
+            "vocab_size": self.config.vocab_size,
+            "hidden_dim": self.config.hidden_dim,
+            "num_layers": self.config.num_layers,
+            "num_heads": self.config.num_heads,
+            "num_kv_heads": self.config.num_kv_heads,
+            "ff_dim": self.config.ff_dim,
+            "max_seq_len": self.config.max_seq_len,
+            "rms_norm_eps": self.config.rms_norm_eps,
+            "rope_theta": self.config.rope_theta,
+            "use_flash_attention": self.config.use_flash_attention,
+            "use_sliding_window": self.config.use_sliding_window,
+            "sliding_window_size": self.config.sliding_window_size,
+            "use_swiglu": self.config.use_swiglu,
+            "tie_embeddings": self.config.tie_embeddings,
+        }
+
+        with open(os.path.join(save_directory, "config.json"), "w") as f:
+            json.dump(config_dict, f, indent=2)
+
+    @classmethod
+    def from_pretrained(cls, model_path: str, device: Optional[torch.device] = None):
+        """Load model from pretrained weights."""
+        import os
+        import json
+
+        # Load config
+        with open(os.path.join(model_path, "config.json"), "r") as f:
+            config_dict = json.load(f)
+
+        config = SPARSAConfig(
+            vocab_size=config_dict["vocab_size"],
+            hidden_dim=config_dict["hidden_dim"],
+            num_layers=config_dict["num_layers"],
+            num_heads=config_dict["num_heads"],
+            num_kv_heads=config_dict.get("num_kv_heads", config_dict["num_heads"]),
+            ff_dim=config_dict["ff_dim"],
+            max_seq_len=config_dict["max_seq_len"],
+            rms_norm_eps=config_dict.get("rms_norm_eps", 1e-6),
+            rope_theta=config_dict.get("rope_theta", 10000.0),
+            use_flash_attention=config_dict.get("use_flash_attention", True),
+            use_sliding_window=config_dict.get("use_sliding_window", True),
+            sliding_window_size=config_dict.get("sliding_window_size", 512),
+            use_swiglu=config_dict.get("use_swiglu", True),
+            tie_embeddings=config_dict.get("tie_embeddings", False),
+            device=device,
+        )
+
+        # Create model
+        model = cls(config)
+
+        # Load weights
+        state_dict = torch.load(
+            os.path.join(model_path, "pytorch_model.bin"),
+            map_location=device or "cpu",
+        )
+        model.load_state_dict(state_dict)
+
+        if device:
+            model = model.to(device)
+
+        return model
+
+    def num_parameters(self, trainable_only: bool = False) -> int:
+        """Count model parameters."""
+        if trainable_only:
+            return sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return sum(p.numel() for p in self.parameters())
+
+
+# Backward compatibility alias
+Transformer = SPARSALM
+TransformerConfig = SPARSAConfig
+
+
+def create_model(config: Dict[str, Any]) -> SPARSALM:
+    """Factory function to create SPARSA-LM model from config dict."""
+    model_config = SPARSAConfig(
+        vocab_size=config.get("vocab_size", 32000),
+        hidden_dim=config.get("hidden_dim", 1024),
+        num_layers=config.get("num_layers", 28),
+        num_heads=config.get("num_heads", 16),
+        num_kv_heads=config.get("num_kv_heads", 8),
+        ff_dim=config.get("ff_dim", 4096),
+        max_seq_len=config.get("max_seq_len", 2048),
+        rms_norm_eps=config.get("rms_norm_eps", 1e-6),
+        use_flash_attention=config.get("use_flash_attention", True),
+        use_sliding_window=config.get("use_sliding_window", True),
+        sliding_window_size=config.get("sliding_window_size", 512),
+        use_swiglu=config.get("use_swiglu", True),
+        dropout=config.get("dropout", 0.0),
+        use_checkpointing=config.get("use_checkpointing", True),
+        tie_embeddings=config.get("tie_embeddings", False),
+        initializer_range=config.get("initializer_range", 0.02),
+    )
+
+    return SPARSALM(model_config)

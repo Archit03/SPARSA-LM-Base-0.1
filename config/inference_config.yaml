@@ -1,79 +1,116 @@
-generation:
-  max_length: 128           # Reduced from 128 - smaller models struggle with longer sequences
-  temperature: 0.6         # Lower temperature for more focused outputs
-  top_k: 40                # More restrictive token selection
-  top_p: 0.85              # Slightly more restrictive nucleus sampling
-  repetition_penalty: 1.5  # Less aggressive repetition prevention
-  do_sample: true
-  num_beams: 4             # Fewer beams for small models
-  no_repeat_ngram_size: 3  # Smaller n-gram restriction
-  length_penalty: 1.0      # Neutral length penalty
-  early_stopping: true
+# config/inference_config.yaml
+# SPARSA-LM 360M Inference Configuration
 
-inference:
-  model_path: model/best_LuminaLM_model.pt
-  seed: 42
+# Model settings
+model:
+  path: "checkpoints/sparsa-360m"
+  tokenizer_path: "tokenizer"
+  dtype: "bfloat16"  # bfloat16, float16, float32
+  hidden_dim: 1024
+  num_layers: 28
+  num_heads: 16
+  num_kv_heads: 8
+  ff_dim: 4096
+  vocab_size: 32000
+  max_seq_len: 2048
 
-logging:
-  gradient_logging_frequency: 2000
-  log_dir: SPARSA-LM-Base 0.1/logs
-  log_frequency: 500
-  log_gradients: false
-  log_model_weights: false
-  log_train_steps: true
-  use_wandb: false
-  wandb_entity: null
-  wandb_project: LuminaLM_Base_Small
+# Hardware settings
+hardware:
+  device: "cuda"
+  tensor_parallel_size: 4  # For 4x L4 GPUs
+  gpu_memory_utilization: 0.90
+  max_num_gpus: 4
 
-memory_monitor:
-  empty_cache: true
+# vLLM settings
+vllm:
   enabled: true
-  log_frequency: 10
+  max_model_len: 4096
+  max_num_seqs: 256
+  enable_chunked_prefill: true
+  enable_prefix_caching: true
+  disable_log_stats: false
+
+# Generation defaults
+generation:
+  max_tokens: 2048
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  repetition_penalty: 1.1
+  presence_penalty: 0.0
+  frequency_penalty: 0.0
+  do_sample: true
+  num_beams: 1
+  early_stopping: true
+  stop_sequences:
+    - "<|end|>"
+    - "<|user|>"
+
+# Batching
+batching:
+  max_batch_size: 32
+  continuous_batching: true
+  dynamic_batching: true
+  max_batch_wait_time_ms: 50
+
+# Speculative decoding (optional)
+speculative:
+  enabled: false
+  draft_model: null
+  num_speculative_tokens: 5
+
+# Server settings
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  timeout: 300
+  cors_origins:
+    - "*"
+
+# API settings
+api:
+  openai_compatible: true
+  enable_streaming: true
+  enable_chat: true
+  enable_completions: true
+
+# RAG settings
+rag:
+  enabled: true
+  vector_store: "faiss"  # faiss or chromadb
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  top_k: 5
+  similarity_threshold: 0.5
+  chunk_size: 512
+  chunk_overlap: 50
+  persist_directory: "data/vector_store"
+
+# Logging
+logging:
+  level: "INFO"
+  log_requests: true
+  log_responses: false
+  log_file: "logs/inference.log"
+  use_wandb: false
+  wandb_project: "SPARSA-LM-360M"
+
+# Memory monitoring
+memory_monitor:
+  enabled: true
+  empty_cache: true
+  log_frequency: 100
   monitor_cpu: true
   monitor_gpu: true
 
-model:
-  hidden_dim: 128
-  num_layers: 2
-  num_heads: 4
-  ff_dim: 256
-  dropout: 0.2
-  vocab_size: 8000
-  max_seq_len: 64
-  use_checkpointing: true
-  activation: "gelu"
-  tie_embeddings: true
-  window_size: 16
-  global_tokens: 4
-  use_reentrant: false
-  initializer_range: 0.02
-  use_layer_norm: true
-  normalize_before: true
+# Monitoring
+monitoring:
+  enabled: true
+  prometheus_port: 9090
+  health_check_path: "/health"
 
+# Tokenizer settings
 tokenizer:
   add_special_tokens: true
-  path: C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer
-
-training:
-  amp_scaler_init_scale: 8192
-  batch_size: 2
-  checkpoint_dir: C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/model
-  checkpoint_save_frequency: 1
-  device: cuda
-  early_stopping_patience: 3
-  enable_gradient_accumulation: true
-  epochs: 10
-  eval_every_n_epochs: 1
-  gradient_accumulation_steps: 16
-  learning_rate: 2e-4
-  log_every_n_steps: 100
-  lr_scheduler_kwargs:
-    min_lr: 1e-6
-  max_grad_norm: 1.0
-  resume_from_checkpoint: null
-  scheduler_type: cosine_with_min_lr
-  seed: 42
-  use_gradient_checkpointing: false
-  use_mixed_precision: true
-  warmup_ratio: 0.1
-  weight_decay: 0.01
+  path: "tokenizer"
+  vocab_size: 32000

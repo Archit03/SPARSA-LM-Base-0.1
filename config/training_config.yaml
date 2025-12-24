@@ -1,118 +1,106 @@
-# config/squad_training_config.yaml
-# Configuration for training SPARSA-LM on SQuAD dataset
+# config/training_config.yaml
+# SPARSA-LM 360M Production Model - Modern LLaMA-Style Architecture
 
 training:
   device: "cuda"
-  epochs: 10
-  batch_size: 16  # Adjust based on GPU memory
-  learning_rate: 0.00003
-  weight_decay: 0.01
+  epochs: 100
+  batch_size: 4
+  learning_rate: 3e-4
+  weight_decay: 0.1
   max_grad_norm: 1.0
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 8
   seed: 42
   resume_from_checkpoint: null
-  checkpoint_dir: "model/squad"
-  checkpoint_save_frequency: 1
+  checkpoint_dir: "checkpoints/sparsa-360m"
+  checkpoint_save_frequency: 1000
   scheduler_type: "cosine_with_min_lr"
   lr_scheduler_kwargs:
-    min_lr: 0.000001
-  log_every_n_steps: 50
+    min_lr: 1e-5
+  log_every_n_steps: 10
   eval_every_n_epochs: 1
-  early_stopping_patience: 3
+  early_stopping_patience: 5
   use_mixed_precision: true
-  amp_scaler_init_scale: 8192
+  bf16: true  # Use bfloat16 instead of fp16
+  amp_scaler_init_scale: 65536
   max_grad_value: 10.0
-  
-  # QA-specific settings
-  use_noise_injection: false  # Disable noise for QA tasks
-  evaluate_metrics: true  # Enable QA metrics (EM, F1)
+  warmup_ratio: 0.03
+  num_workers: 4
+
+  # Multi-GPU settings
+  distributed: true
+  use_deepspeed: true
+  deepspeed_config: "config/deepspeed_config.json"
 
 dataset:
-  type: "squad"
-  version: "v2.0"  # or "v1.1"
-  max_seq_len: 512  # For context + question
-  max_answer_len: 128
-  train_subsample: null  # Set to small number for testing (e.g., 1000)
-  val_subsample: null    # Set to small number for testing (e.g., 100)
-  cache_dir: "./cache/squad"
-  num_workers: 4
-  shuffle: true
-  pin_memory: true
-  prefetch_factor: 2
-  persistent_workers: true
+  train_dataset: "huggingface_mix"
+  max_seq_len: 2048
+  split:
+    test_size: 0.05
+    random_state: 42
 
 tokenizer:
-  path: "C:/Users/ASUS/Desktop/SPARSA-LM-Base 0.1/data/processed/tokenizer"
-  add_special_tokens: true
-  
-  # Additional tokens for QA
-  qa_tokens:
-    - "[QUESTION]"
-    - "[CONTEXT]"
-    - "[ANSWER]"
+  type: "sentencepiece"  # Modern SentencePiece tokenizer
+  path: "tokenizer"
+  vocab_size: 32000  # LLaMA-style vocab size
 
 model:
-  hidden_dim: 256  # Increased for QA complexity
-  num_layers: 6    # Deeper model for better comprehension
-  num_heads: 8
-  ff_dim: 1024
-  dropout: 0.1
-  vocab_size: 32000  # Increased vocab for better coverage
-  max_seq_len: 512
-  max_answer_len: 128
+  # SPARSA-LM 360M - Modern LLaMA-Style Architecture
+  # ~360M params: vocab=32000, d_model=1024, layers=28, ff_dim=4096
+  architecture: "llama"
+  hidden_dim: 1024
+  num_layers: 28
+  num_heads: 16
+  num_kv_heads: 8  # Grouped Query Attention (GQA) for efficiency
+  ff_dim: 4096
+  ff_multiplier: 4
+  dropout: 0.0  # Modern LLMs use no dropout
+  vocab_size: 32000
+  max_seq_len: 2048
+
+  # Modern architecture features
+  use_rms_norm: true  # RMSNorm instead of LayerNorm
+  rms_norm_eps: 1e-6
+  use_swiglu: true  # SwiGLU activation
+  use_rope: true  # Rotary Position Embeddings
+  rope_theta: 10000.0
+  rope_scaling: null  # For extended context: {"type": "linear", "factor": 2.0}
+
+  # Attention settings
+  use_flash_attention: true
+  use_sliding_window: true
+  sliding_window_size: 512
+  attention_bias: false  # No bias in attention projections
+
+  # Efficiency
   use_checkpointing: true
-  activation: "gelu"
-  tie_embeddings: true
-  window_size: 32  # Larger window for context understanding
-  global_tokens: 8  # More global tokens for QA
-  use_reentrant: false
+  tie_embeddings: false  # Don't tie for modern models
   initializer_range: 0.02
-  use_layer_norm: true
-  normalize_before: true
-  
-  # QA-specific architecture options
-  use_cross_attention: true  # Enable cross-attention for QA
-  answer_pooling: "first"  # How to pool answer representations
 
 logging:
-  log_dir: "logs/squad"
+  log_dir: "logs/sparsa-360m"
   use_wandb: true
-  wandb_project: "SPARSA-LM-SQuAD"
+  wandb_project: "SPARSA-LM-360M"
   wandb_entity: null
   log_gradients: false
   log_model_weights: false
   log_train_steps: true
-  log_frequency: 100
-  
-  # QA-specific logging
-  log_qa_metrics: true
-  log_sample_predictions: true
-  num_samples_to_log: 5
+  log_frequency: 10
 
 memory_monitor:
   enabled: true
-  log_frequency: 50
+  log_frequency: 100
   monitor_gpu: true
   monitor_cpu: true
   empty_cache: true
-  max_memory_usage_percentage: 90
+  max_memory_usage_percentage: 95
 
 optimizer:
   type: "adamw"
-  eps: 0.00000001
-  betas: [0.9, 0.999]
+  eps: 1e-8
+  betas: [0.9, 0.95]
   fused: true
-  gradient_centralization: false
 
 extras:
   use_gradient_checkpointing: true
-  activation_checkpointing: true
-  fp16_opt_level: "O1"
-  deterministic_algorithms: false
-  detect_anomaly: false
-  empty_cuda_cache_freq: 10
-  
-  # QA evaluation settings
-  eval_beam_size: 4
-  eval_length_penalty: 1.0
-  eval_no_repeat_ngram_size: 3
+  compile_model: true
+  torch_compile_mode: "reduce-overhead"
