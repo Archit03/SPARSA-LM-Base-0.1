@@ -1,0 +1,110 @@
+# SPARSA-LM Finetuning Configuration
+# DAPO/VAPO RL-based Finetuning
+
+# Model
+model:
+  path: outputs/pretrain/final
+  tokenizer_path: tokenizer
+
+# Algorithm Selection
+algorithm:
+  name: dapo  # dapo or vapo
+
+  # DAPO-specific (Decoupled Clip and Dynamic Sampling)
+  dapo:
+    enabled: true
+    clip_range_upper: 0.2
+    clip_range_lower: 0.1
+    dynamic_sampling: true
+    sampling_temperature_init: 1.0
+    sampling_temperature_decay: 0.995
+    entropy_coef: 0.01
+    entropy_target: 0.1
+
+  # VAPO-specific (Value-model Augmented PPO)
+  vapo:
+    enabled: false
+    value_model_coef: 0.5
+    reward_smoothing: 0.1
+    dense_reward: true
+    value_clip_range: 0.2
+
+# PPO Hyperparameters
+ppo:
+  epochs: 4
+  gamma: 1.0
+  lam: 0.95
+  init_kl_coef: 0.1
+  target_kl: 0.1
+  adaptive_kl: true
+
+# Training Configuration
+training:
+  num_epochs: 3
+  max_steps: -1
+  per_device_batch_size: 4
+  gradient_accumulation_steps: 4
+
+  # Optimizer
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  max_grad_norm: 1.0
+
+  # Learning Rate Schedule
+  warmup_steps: 100
+  lr_scheduler: cosine
+
+  # Mixed Precision
+  bf16: true
+  fp16: false
+
+# Generation Configuration
+generation:
+  max_new_tokens: 256
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  num_return_sequences: 1
+
+# Reward Configuration
+reward:
+  model_path: null  # Path to reward model if using
+  use_external_reward: false
+  baseline: moving_average  # none, moving_average, critic
+
+# Reference Model
+reference:
+  use_reference_model: true
+  path: null  # If null, uses frozen copy of policy
+
+# DeepSpeed
+deepspeed:
+  enabled: true
+  stage: 2
+
+# Data Configuration
+data:
+  train_data: data/prompts.jsonl
+  max_seq_length: 2048
+
+# Checkpointing
+checkpointing:
+  output_dir: outputs/finetune
+  checkpoint_dir: outputs/finetune/checkpoints
+  save_steps: 500
+  save_total_limit: 3
+  resume_from_checkpoint: null
+
+# Logging
+logging:
+  logging_dir: outputs/finetune/logs
+  logging_steps: 10
+  report_to:
+    - wandb
+  wandb_project: sparsa-lm-finetune
+
+# Reproducibility
+seed: 42

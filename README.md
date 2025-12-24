@@ -1,87 +1,224 @@
-# Welcome to SPARSA-LM
+# SPARSA-LM v0.2.0
 
-## About SPARSA-LM
-**SPARSA-LM** (Sparse Attention Lumina Language Model) is a Small Language Model (SLM) designed to push the boundaries of artificial intelligence by integrating cutting-edge deep learning techniques, multimodal capabilities, and domain-specific expertise. SPARSA-LM is crafted to address complex challenges in science, medicine, technology, and research.
+## AutoRegressive Language Model with DAPO/VAPO RL Finetuning
 
----
-
-## Mission
-To develop a state-of-the-art LLM that empowers researchers, professionals, and organizations to solve real-world problems, advance scientific discovery, and democratize access to AI-powered insights.
+**SPARSA-LM** is a modern AutoRegressive Language Model built with state-of-the-art techniques including RMSNorm, Rotary Position Embeddings (RoPE), Grouped Query Attention (GQA), and SwiGLU activation. It features separate pipelines for pretraining and RL-based finetuning using DAPO and VAPO algorithms.
 
 ---
 
-## Vision
-To shape a future where AI serves as a driving force for innovation, collaboration, and understanding, enabling breakthroughs across diverse fields and communities.
+## Features
+
+### Model Architecture
+- **AutoRegressive Transformer** - Decoder-only architecture for causal language modeling
+- **RMSNorm** - Efficient normalization without computing mean
+- **Rotary Position Embeddings (RoPE)** - Better length generalization
+- **Grouped Query Attention (GQA)** - Reduced memory and computation
+- **SwiGLU Activation** - Improved feed-forward performance
+- **Flash Attention 2** - Optional optimized attention
+- **Sliding Window Attention** - Efficient long-context handling
+- **KV-Cache** - Fast autoregressive generation
+
+### Training Pipelines
+
+#### Pretraining
+- DeepSpeed ZeRO optimization (stages 0-3)
+- Mixed precision training (BF16/FP16)
+- Gradient checkpointing
+- Distributed data parallel training
+- Streaming datasets support
+
+#### RL Finetuning
+- **DAPO** (Decoupled Clip and Dynamic Sampling Policy Optimization)
+  - Decoupled upper/lower clip bounds
+  - Dynamic sampling temperature
+  - Entropy targeting to prevent collapse
+
+- **VAPO** (Value-model Augmented Proximal Policy Optimization)
+  - Dense per-token rewards from value model
+  - Reward smoothing for stability
+  - Value function clipping
 
 ---
 
-## Key Features
-### 🧠 **Advanced AI Capabilities**
-- Built on the foundation of multimodal understanding, combining text, image, and structured data for versatile applications.
-- Leverages state-of-the-art deep learning architectures, including unified Transformer models and sparse attention mechanisms.
+## Project Structure
 
-### 🔬 **Domain Expertise**
-- Specially tailored for scientific, medical, and technical domains, providing accurate and domain-specific insights.
-- Optimized for processing large datasets, including biomedical literature, scientific papers, and open-access repositories.
-
-### 🌍 **Multilingual and Inclusive**
-- Supports multiple languages, fostering global collaboration and catering to diverse communities.
-
-### ⚡ **Scalability and Efficiency**
-- Engineered for high performance, adaptable to both local systems and large-scale distributed environments.
-- Designed with sparse attention for computational efficiency and scalability.
+```
+SPARSA-LM-Base-0.1/
+├── src/
+│   ├── model/
+│   │   ├── config.py          # Model configuration
+│   │   ├── layers.py          # Core layers (RMSNorm, RoPE, GQA, SwiGLU)
+│   │   ├── architecture.py    # AutoRegressive model
+│   │   └── generation.py      # Text generation utilities
+│   ├── data/
+│   │   ├── dataset.py         # Dataset classes
+│   │   └── collator.py        # Data collation
+│   ├── pretrain/
+│   │   ├── config.py          # Pretraining configuration
+│   │   └── trainer.py         # Pretraining trainer
+│   └── finetune/
+│       ├── config.py          # Finetuning configuration
+│       ├── dapo.py            # DAPO implementation
+│       ├── vapo.py            # VAPO implementation
+│       └── trainer.py         # RL finetuning trainer
+├── scripts/
+│   ├── pretrain.py            # Pretraining entry point
+│   └── finetune.py            # Finetuning entry point
+├── config/
+│   ├── pretrain.yaml          # Pretraining configuration
+│   ├── finetune.yaml          # Finetuning configuration
+│   └── deepspeed.json         # DeepSpeed configuration
+├── requirements.txt
+├── setup.py
+└── README.md
+```
 
 ---
 
-## Getting Started
+## Installation
+
 ### Prerequisites
-- **Python 3.11** or later
-- GPU-enabled system for optimal performance
-- Libraries specified in `requirements.txt`
+- Python 3.9+
+- CUDA-enabled GPU (recommended)
 
-### Installation
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Archit03/SPARSA-LM-Base-0.1
-   cd SPARSA-LM
-   ```
-
-2. Install required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-### Usage
-
-#### Training the Model
-Run the training script to train SPARSA-LM:
+### Install
 ```bash
-python src/training.py
+git clone https://github.com/Archit03/SPARSA-LM-Base-0.1
+cd SPARSA-LM-Base-0.1
+pip install -e .
 ```
 
-#### Generating Text
-Generate text using the trained model:
+### With Flash Attention (optional)
 ```bash
-python src/inference.py
+pip install -e ".[flash-attn]"
 ```
+
+### For Development
+```bash
+pip install -e ".[dev]"
+```
+
+---
+
+## Usage
+
+### Pretraining
+
+```bash
+# Single GPU
+python scripts/pretrain.py \
+    --model_size base \
+    --tokenizer_path path/to/tokenizer \
+    --output_dir outputs/pretrain \
+    --num_epochs 3 \
+    --batch_size 4
+
+# Multi-GPU with DeepSpeed
+deepspeed scripts/pretrain.py \
+    --model_size base \
+    --tokenizer_path path/to/tokenizer \
+    --output_dir outputs/pretrain \
+    --deepspeed \
+    --deepspeed_stage 2
+```
+
+### RL Finetuning
+
+#### DAPO (Recommended)
+```bash
+python scripts/finetune.py \
+    --model_path outputs/pretrain/final \
+    --tokenizer_path path/to/tokenizer \
+    --algorithm dapo \
+    --train_data data/prompts.jsonl \
+    --output_dir outputs/finetune-dapo
+```
+
+#### VAPO
+```bash
+python scripts/finetune.py \
+    --model_path outputs/pretrain/final \
+    --tokenizer_path path/to/tokenizer \
+    --algorithm vapo \
+    --train_data data/prompts.jsonl \
+    --output_dir outputs/finetune-vapo \
+    --dense_reward
+```
+
+---
+
+## Model Configurations
+
+| Size  | Parameters | Layers | Hidden | Heads | KV Heads |
+|-------|------------|--------|--------|-------|----------|
+| Small | ~125M      | 12     | 768    | 12    | 4        |
+| Base  | ~360M      | 28     | 1024   | 16    | 8        |
+| Large | ~760M      | 32     | 1536   | 24    | 8        |
+| XL    | ~1.5B      | 36     | 2048   | 32    | 8        |
+
+---
+
+## Python API
+
+```python
+from src.model import AutoRegressiveLM, ModelConfig
+
+# Create model
+config = ModelConfig.base()
+model = AutoRegressiveLM(config)
+
+# Generate text
+input_ids = tokenizer.encode("Hello, world!", return_tensors="pt")
+output = model.generate(
+    input_ids,
+    max_new_tokens=100,
+    temperature=0.7,
+    top_p=0.9,
+)
+text = tokenizer.decode(output[0])
+```
+
+---
+
+## DAPO vs VAPO
+
+| Feature | DAPO | VAPO |
+|---------|------|------|
+| Clipping | Decoupled (upper/lower) | Standard PPO |
+| Sampling | Dynamic temperature | Fixed |
+| Rewards | Sparse (end of sequence) | Dense (per-token) |
+| Value Model | Optional | Required |
+| Best For | Preventing entropy collapse | Long sequences |
 
 ---
 
 ## Contributing
-We welcome contributions! Feel free to open issues, submit pull requests, or suggest improvements to make SPARSA-LM better.
+
+Contributions are welcome! Please open issues or submit pull requests.
 
 ---
 
 ## License
-This project is licensed under the Proprietary License. See the `EllanorAI LICENSE` file for details.
+
+This project is licensed under the MIT License.
 
 ---
 
 ## Contact
-For questions or collaboration, reach out to:
-- **Email:** [email](architsood@ellanorai.org)
-- **Website:** [Website](https://ellanorai.org)
+
+- **Author:** Archit Sood @ EllanorAI
+- **Email:** architsood@ellanorai.org
+- **Website:** https://ellanorai.org
 
 ---
 
-Thank you for being part of the SPARSA-LM journey! 🚀
+## Citation
+
+```bibtex
+@software{sparsa_lm,
+  title = {SPARSA-LM: AutoRegressive Language Model with DAPO/VAPO RL Finetuning},
+  author = {Sood, Archit},
+  year = {2024},
+  url = {https://github.com/Archit03/SPARSA-LM-Base-0.1}
+}
+```
