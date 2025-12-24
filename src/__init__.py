@@ -1,20 +1,24 @@
-from .tokenizer import MedicalTokenizer
-from .dataset import DatasetProcessor
-from .model import Transformer
-from .training import Trainer
-from .evaluation import evaluate_model
-from .inference import generate_text
-from .utils import setup_logger, MemoryMonitor
+"""
+SPARSA-LM: Sparse Attention Language Model
+AutoRegressive Architecture with DAPO/VAPO RL Finetuning
+"""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
+
+from .model import AutoRegressiveLM, ModelConfig
+from .data import PretrainDataset, FinetuneDataset, DataCollator
+from .pretrain import PretrainConfig, PretrainTrainer
+from .finetune import DAPOTrainer, VAPOTrainer, FinetuneConfig
 
 __all__ = [
-    "MedicalTokenizer",
-    "DatasetProcessor",
-    "Transformer",
-    "Trainer",
-    "evaluate_model",
-    "generate_text",
-    "setup_logger",
-    "MemoryMonitor"
+    "AutoRegressiveLM",
+    "ModelConfig",
+    "PretrainDataset",
+    "FinetuneDataset",
+    "DataCollator",
+    "PretrainConfig",
+    "PretrainTrainer",
+    "DAPOTrainer",
+    "VAPOTrainer",
+    "FinetuneConfig",
 ]

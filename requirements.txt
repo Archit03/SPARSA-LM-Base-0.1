@@ -1,12 +1,18 @@
-# SPARSA-LM 360M Production Requirements
+# SPARSA-LM v0.2.0 Requirements
+# AutoRegressive Language Model with DAPO/VAPO RL Finetuning
+
+# =============================================================================
 # Core Dependencies
+# =============================================================================
 
 # PyTorch (install with CUDA support as needed)
 torch>=2.1.0
 torchvision>=0.16.0
 torchaudio>=2.1.0
 
+# =============================================================================
 # HuggingFace Ecosystem
+# =============================================================================
 transformers>=4.36.0
 datasets>=2.16.0
 tokenizers>=0.15.0
@@ -14,117 +20,89 @@ accelerate>=0.25.0
 huggingface_hub>=0.20.0
 safetensors>=0.4.0
 
-# DeepSpeed for Multi-GPU Training
+# =============================================================================
+# Distributed Training
+# =============================================================================
 deepspeed>=0.12.0
 
-# vLLM for High-Performance Inference
-vllm>=0.2.7
+# =============================================================================
+# Attention Optimization (Optional - requires CUDA)
+# =============================================================================
+# flash-attn>=2.4.0  # Uncomment if CUDA available
+# triton>=2.1.0      # Uncomment for custom kernels
 
-# Flash Attention 2 (for optimized attention)
-flash-attn>=2.4.0
+# =============================================================================
+# High-Performance Inference (Optional)
+# =============================================================================
+# vllm>=0.2.7  # Uncomment for production inference
 
-# Triton for Custom Kernels
-triton>=2.1.0
-
+# =============================================================================
 # Numerical Computing
+# =============================================================================
 numpy>=1.24.0
 scipy>=1.11.0
 
-# FAISS for Vector Store (CPU version, use faiss-gpu for GPU)
-faiss-cpu>=1.7.4
-# faiss-gpu>=1.7.4  # Uncomment for GPU support
-
-# ChromaDB Alternative Vector Store
-chromadb>=0.4.0
-
-# Sentence Transformers for Embeddings
-sentence-transformers>=2.2.0
-
-# Web Framework
-fastapi>=0.104.0
-uvicorn>=0.24.0
-pydantic>=2.5.0
-
-# Gradio for UI
-gradio>=4.10.0
-
-# Experiment Tracking
-wandb>=0.16.0
-tensorboard>=2.15.0
-
+# =============================================================================
 # Configuration
+# =============================================================================
 pyyaml>=6.0
 omegaconf>=2.3.0
 
-# Progress Bars
+# =============================================================================
+# Experiment Tracking
+# =============================================================================
+wandb>=0.16.0
+tensorboard>=2.15.0
+
+# =============================================================================
+# Progress and Logging
+# =============================================================================
 tqdm>=4.66.0
-
-# Logging
 colorlog>=6.8.0
+rich>=13.7.0
 
+# =============================================================================
 # Data Processing
+# =============================================================================
 pandas>=2.1.0
 pyarrow>=14.0.0
 
+# =============================================================================
+# Utilities
+# =============================================================================
+python-dotenv>=1.0.0
+click>=8.1.0
+
+# =============================================================================
 # Testing
+# =============================================================================
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 
+# =============================================================================
 # Code Quality
+# =============================================================================
 black>=23.11.0
 isort>=5.12.0
 flake8>=6.1.0
-
-# Type Checking
 mypy>=1.7.0
 
-# Documentation
-mkdocs>=1.5.0
-mkdocs-material>=9.5.0
+# =============================================================================
+# Model Optimization (Optional)
+# =============================================================================
+# bitsandbytes>=0.41.0  # For quantization
 
-# Utilities
-python-dotenv>=1.0.0
-click>=8.1.0
-rich>=13.7.0
-
-# CUDA Utilities (optional)
-cupy-cuda12x>=12.3.0  # Adjust CUDA version as needed
-
-# Optuna for Hyperparameter Tuning
-optuna>=3.4.0
-
-# scikit-learn for utilities
-scikit-learn>=1.3.0
-
-# Regex for tokenization
-regex>=2023.10.0
-
-# Sentencepiece for tokenizer
-sentencepiece>=0.1.99
-
-# For handling large files
-smart_open>=6.4.0
-
-# JSON handling
-orjson>=3.9.0
-
-# HTTP client
-httpx>=0.25.0
-aiohttp>=3.9.0
-
-# Memory profiling
-memory_profiler>=0.61.0
+# =============================================================================
+# Memory Profiling
+# =============================================================================
 psutil>=5.9.0
 
-# Model optimization
-bitsandbytes>=0.41.0
+# =============================================================================
+# JSON Handling
+# =============================================================================
+orjson>=3.9.0
 
-# GGUF/GGML support (optional)
-# llama-cpp-python>=0.2.0
-
-# OpenAI API compatibility (optional)
-openai>=1.3.0
-
-# LangChain integration (optional)
-# langchain>=0.0.350
-# langchain-community>=0.0.10
+# =============================================================================
+# HTTP Client
+# =============================================================================
+httpx>=0.25.0
